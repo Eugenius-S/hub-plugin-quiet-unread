@@ -1,9 +1,15 @@
 {
   "name": "quiet-unread",
   "icon": "icon.png",
-  "description": "«Новое» у сессии (синяя точка и раздел «Новое» во вкладке «Сейчас») — только когда итог адресован вам: ответ на ваше сообщение, на вашу задачу или продолжение такого хода. Итоги хаба — всегда; в настройках галочками — кому ещё горит любой итог (специалисты, исполнители, остальные)",
-  "why": "Непрочитанное не дёргает по служебным сообщениям",
-  "version": "0.2.1",
+  "description": "\"New\" on a session (the blue dot and the \"New\" section in the \"Now\" tab) only when the result is addressed to you: a reply to your message, to your task, or the continuation of such a turn. The hub's results always count; in the settings, tick who else lights up on any result (specialists, executors, other sessions)",
+  "why": "Unread does not nag about service messages",
+  "i18n": {
+    "ru": {
+      "description": "«Новое» у сессии (синяя точка и раздел «Новое» во вкладке «Сейчас») — только когда итог адресован вам: ответ на ваше сообщение, на вашу задачу или продолжение такого хода. Итоги хаба — всегда; в настройках галочками — кому ещё горит любой итог (специалисты, исполнители, остальные)",
+      "why": "Непрочитанное не дёргает по служебным сообщениям"
+    }
+  },
+  "version": "0.3.0",
   "hub": "^1.10",
   "web": "main.js"
 }

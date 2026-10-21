@@ -1,21 +1,23 @@
-# Тихое «непрочитано»: плагин Agents Hub
+# Quiet unread: an Agents Hub plugin
 
-Метка «новое» у сессии (синяя точка в списке и раздел «Новое» во вкладке «Сейчас») загорается только на итог, адресованный вам: ответ на ваше сообщение, на вашу задачу или продолжение такого хода, когда закончилась фоновая работа.
+The "new" mark on a session (the blue dot in the list and the "New" section in the "Now" tab) lights up only for a result addressed to you: a reply to your message, to your task, or the continuation of such a turn when background work has finished.
 
-Служебное больше не подсвечивается: ответы сессий на сообщения ядра, отчёты сессий друг другу, «запушил», передача дел перед сном, сторож. Карточку-вопрос к вам по-прежнему видно по метке «ждёт вас».
+Service traffic no longer lights up: session replies to core messages, sessions' reports to each other, "pushed", the handoff before sleep, the watchdog. A card with a question to you is still visible by the "waiting for you" mark.
 
-## Настройки
+## Settings
 
-«Настройки» → «Тихое «непрочитано»»: галочками — у кого «новое» горит на любой итог, как без плагина. По умолчанию включён только хаб: его итоги видно всегда. Специалисты, исполнители и остальные сессии — выключены.
+"Settings" → "Quiet unread": tick the roles for which "new" lights up on any result, as without the plugin. By default only the hub is on: its results are always visible. Specialists, executors and other sessions are off.
 
-## Поставить
+The settings text is English by default and Russian when the hub language is Russian.
 
-«Настройки» → «Плагины» → вставить ссылку на этот репозиторий → «Проверить и поставить». Нужен хаб, где ядро отмечает итоги владельцу (`owner_reply` в снимке сессии) и у плагинов есть `hub.addUnread`. На хабе без этого плагин ничего не меняет — «непрочитано» решает ядро, как раньше.
+## Install
 
-## Проверка
+"Settings" → "Plugins" → paste the link to this repository → "Check and install". Needs a hub where the core marks results for the owner (`owner_reply` in the session snapshot) and plugins have `hub.addUnread`. On a hub without it the plugin changes nothing: "unread" is decided by the core, as before.
+
+## Tests
 
 ```
 node --test tests/unread.test.mjs
 ```
 
-Иконка — [3D Fluency](https://icons8.com/icons/3d-fluency) от Icons8.
+Icon — [3D Fluency](https://icons8.com/icons/3d-fluency) by Icons8.
