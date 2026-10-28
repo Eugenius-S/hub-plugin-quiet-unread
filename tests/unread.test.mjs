@@ -53,7 +53,7 @@ test("settings text is Russian when the hub language is Russian", () => {
   assert.equal(g.title, "Тихое «непрочитано»");
   assert.equal(g.hint, "Где «новое» горит на любой итог, а не только на ответ вам");
   assert.deepEqual(g.options.map((o) => o.label), ["Хаб", "Специалисты", "Исполнители", "Остальные сессии"]);
-  assert.equal(g.options[0].hint, "Его итоги — всегда «новое»");
+  assert.equal(g.options[0].hint, "Его итоги всегда «новое»");
 });
 
 test("any other language falls back to English", () => {
