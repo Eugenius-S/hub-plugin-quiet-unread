@@ -1,6 +1,7 @@
 // "Unread" for a session - only a result strictly for the owner (the core's owner_reply: a turn made for their message or its
 // continuation, a reply to their task); service messages of the core and sessions (REPLIED, HANDOFF, "push it", the
-// watchdog, reports to each other) - no. Roles ticked in the settings - any result, as in the core (owner_out). A core
+// watchdog, reports to each other, a "—" pass-on line) - no; a result right after the owner's task to the session broke
+// on an error - yes. Roles ticked in the settings - any result, as in the core (owner_out). A core
 // without owner_reply (old) decides itself.
 export const ROLES = [
   { key: "hub", hint: true, on: true },
@@ -37,10 +38,27 @@ export const makeT = (hub) => (k, v) => {
   return s;
 };
 
-export function unread(s, loud = () => false) {
+// a pass-on line ("—") and a conveyor counter ("— Done 3 of 5") carry nothing to read
+const PASS_ON = /^\s*[—–-](\s|$)/;
+// a stopped task still lights up results that follow it within this window (the core no longer ties them to it)
+export const STOPPED_WINDOW = 3 * 3600;
+const seqOf = (id) => (/^d\d+$/.test(id || "") ? Number(id.slice(1)) : Infinity);
+
+// the owner's task to this session broke on an error ("stopped"), and the session then sent its result anyway: the core
+// does not tie such a turn to the task (owner_reply stays behind), but it is what the owner asked for
+function afterStopped(s, snap) {
+  if (typeof s.owner_out !== "number" || typeof s.out_head_ts !== "number") return false;
+  if ((s.out_head || "").trim().length < 20) return false;   // "done", "ok": a service line
+  return (snap?.delegations || []).some((d) => d.session === s.name && d.for && d.state === "stopped"
+    && seqOf(d.id) < s.owner_out && typeof d.since === "number" && s.out_head_ts - d.since <= STOPPED_WINDOW);
+}
+
+export function unread(s, loud = () => false, snap) {
   if (typeof s.owner_reply !== "number" || typeof s.seen !== "number") return undefined;
   if (loud(s.role)) return typeof s.owner_out === "number" ? s.owner_out > s.seen : undefined;
-  return s.owner_reply > s.seen;
+  const replyHead = typeof s.reply_head === "string" ? s.reply_head : s.owner_out === s.owner_reply ? s.out_head : "";
+  if (PASS_ON.test(replyHead || "")) return false;
+  return s.owner_reply > s.seen || (s.owner_out > s.seen && afterStopped(s, snap));
 }
 
 export default function register(hub) {
@@ -56,5 +74,5 @@ export default function register(hub) {
       hint: t("hint"),
       options: ROLES.map((r) => ({ key: r.key, label: t(`role_${r.key}`), ...(r.hint ? { hint: t(`role_${r.key}_hint`) } : {}), on: r.on })),
     });
-  hub.addUnread((s) => unread(s, loud));
+  hub.addUnread((s, snap) => unread(s, loud, snap));
 }

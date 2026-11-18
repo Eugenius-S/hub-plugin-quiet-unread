@@ -72,3 +72,43 @@ test("Russian has every key English has, and every role has a label", () => {
   assert.deepEqual(Object.keys(STR.ru).sort(), Object.keys(STR.en).sort());
   for (const r of ROLES) assert.ok(STR.en[`role_${r.key}`] && STR.ru[`role_${r.key}`], r.key);
 });
+
+// replay of 18.11: the owner's task to a specialist broke on an error (state "stopped"), the specialist then sent the
+// reports anyway - the core no longer ties them to the task (owner_reply stays 0), but they are the owner's results
+const T = 1_800_000_000;
+const report = { name: "analyst", role: "agent", owner_reply: 0, owner_out: 859998, seen: 859000, out_head_ts: T,
+  out_head: "Matchbox: decided to build the farm and autoposting on it; 8 steps below" };
+const snap = (...tasks) => ({ delegations: tasks });
+const task = { id: "d859716", session: "analyst", for: "m859706", state: "stopped", since: T - 1800 };
+
+test("a report after the owner's task broke on an error - new", () => {
+  assert.equal(unread(report, undefined, snap(task)), true);
+});
+
+test("a stopped task does not light up what it should not", () => {
+  assert.equal(unread(report, undefined, snap()), false);
+  assert.equal(unread(report, undefined, undefined), false);
+  assert.equal(unread(report, undefined, snap({ ...task, session: "designer" })), false);   // someone else's task
+  assert.equal(unread(report, undefined, snap({ ...task, for: null })), false);           // not the owner's
+  assert.equal(unread(report, undefined, snap({ ...task, state: "working" })), false);    // the core ties those itself
+  assert.equal(unread(report, undefined, snap({ ...task, id: "d860000" })), false);       // set after the result
+  assert.equal(unread(report, undefined, snap({ ...task, since: T - 2 * 86400 })), false); // stopped days ago
+  assert.equal(unread({ ...report, seen: 860000 }, undefined, snap(task)), false);         // already looked
+  assert.equal(unread({ ...report, out_head: "done" }, undefined, snap(task)), false);     // a service line
+});
+
+test("a pass-on line and a conveyor counter are not new even as a reply", () => {
+  const s = { name: "gen-x", role: "worker", owner_reply: 859551, owner_out: 859551, seen: 859000 };
+  assert.equal(unread({ ...s, out_head: "— Done 42 of 42, 0 in progress." }), false);
+  assert.equal(unread({ ...s, out_head: "—" }), false);
+  assert.equal(unread({ ...s, out_head: "-" }), false);
+  assert.equal(unread({ ...s, out_head: "Done: the post is up" }), true);
+  // the core's own head of the reply (reply_head) wins over the latest result
+  assert.equal(unread({ ...s, owner_out: 859600, out_head: "a later service line", reply_head: "— Done 42 of 42" }), false);
+});
+
+test("the hook hands the snapshot over", () => {
+  const got = {};
+  register({ addUnread: (fn) => (got.fn = fn), option: () => false });
+  assert.equal(got.fn(report, snap(task)), true);
+});
