@@ -7,6 +7,7 @@ Service traffic no longer lights up: session replies to core messages, sessions'
 Two cases the core gets wrong are fixed here:
 
 - your task to a session broke on an error, and the session then sent its result anyway: the core no longer ties that result to your task, the plugin still lights it up (within 3 hours of the break, a line of at least 20 characters) and sends it to you as a notice in Telegram, once;
+- a session you talk to on the page answers later in that talk (a specialist or an executor it called brought the work back): the Telegram bot keeps such a chain on the page as your own talk, the plugin sends that later result to Telegram as a notice, once (your direct reply on the page stays there);
 - a reply that is only a pass-on line or a conveyor counter ("—", "— Done 3 of 5") stays quiet.
 
 ## The process

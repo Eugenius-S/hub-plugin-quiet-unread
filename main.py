@@ -9,8 +9,9 @@ How: it reads the tail of journal.jsonl (raw lines; only `turn.result` lines are
 error, at least MIN_TEXT characters, not a pass-on "—" or a conveyor counter, not the hub) is checked in a child process
 against the core's state at exactly that event (journal.state_at; when the state file is already further on, the journal
 is folded up to it): the session counted it to the owner (owner_out) but not as his reply (owner_reply), no task of his
-took it as its reply (replied_seq: the bot sends that one itself), and a task of his on that session is `stopped` since at
-most WINDOW before it. The child keeps the core's state (hundreds of MB) out of this long-lived process.
+took it as its reply (replied_seq: the bot sends that one itself), and either a task of his on that session is `stopped`
+since at most WINDOW before it, or the turn is a later one of a chain he began with his own words to this session on the
+page (page_talk: the bot keeps such a chain on the page as his own talk, though only his direct reply is read there). The child keeps the core's state (hundreds of MB) out of this long-lived process.
 
 Out: owner.notify {id: r<seq>, title, text, session, push: false} through the spool. The same id is never sent twice: the
 sent ids live in <state>/quiet-unread/state.json, written after the spool. The first start begins at the journal's end
@@ -68,13 +69,29 @@ def important(st, ev):
     tasks = list((st.get("delegations") or {}).values())
     if any(d.get("replied_seq") == seq and d.get("for") for d in tasks):
         return None   # the reply of his task: the bot sends it
+    if page_talk(st, name, sess):
+        return notice(name, seq, text, ((st.get("messages") or {}).get(sess["turn_root"]) or {}).get("text"))
     broke = [d for d in tasks if d.get("session") == name and d.get("for") and d.get("state") == "stopped"
              and (_seq(d.get("id")) or seq) < seq and isinstance(d.get("since"), (int, float))
              and 0 <= ev["ts"] - d["since"] <= WINDOW]
     if not broke:
         return None
     d = max(broke, key=lambda d: d["since"])
-    words = " ".join(str(d.get("words") or "").split())
+    return notice(name, seq, text, d.get("words"))
+
+
+def page_talk(st, name, sess):
+    """A later turn of a chain the owner began with his own words to this session on the page (not Telegram): the turn
+    was woken by something else (a specialist's reply, an executor's result). The bot keeps the whole chain on the page
+    (own_talk), though he has left it long ago; only his direct reply (owner_reply) stays there."""
+    root = sess.get("turn_root")
+    start = (st.get("messages") or {}).get(root or "") or {}
+    return bool(root and sess.get("turn_marker") != root and start.get("from_owner") and start.get("channel") != "telegram"
+                and start.get("session", start.get("to")) == name)
+
+
+def notice(name, seq, text, words):
+    words = " ".join(str(words or "").split())
     title = name + (" · " + words[:40] + ("…" if len(words) > 40 else "") if words else "")
     return {"id": f"r{seq}", "title": title, "text": text, "session": name, "push": False}
 

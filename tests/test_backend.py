@@ -150,6 +150,50 @@ class Replay(unittest.TestCase):
         again.step(now=self.ts + 20)
         self.assertEqual([f"r{r['seq']}"], [s["data"]["id"] for s in self.spooled()])
 
+    def page_talk(self, channel="web"):
+        """The owner writes analyst on the page; analyst answers him there (his reply: the bot keeps it on the page) and
+        passes the work to helper; helper's result wakes analyst again (a follow-up of the chain he started on the page)."""
+        for name in ("analyst", "helper"):
+            self.ev("session.requested", name, {"cwd": TMP, "kind": "work", "role": "agent", "channel": "cli", "owner": True})
+            self.ev("session.started", name, {"session_id": name}, src="hook")
+        m = self.ev("message.received", None, {"to": "analyst", "text": "put the plan into Figma", "channel": channel,
+                                               "owner": True})
+        self.ev("turn.started", "analyst", {"marker": f"m{m['seq']}"}, src="hook")
+        d = self.ev("delegation.created", None, {"session": "helper", "for_session": "analyst", "context": "draw the plan",
+                                                 "channel": "session", "owner": False, "sender": "analyst"})
+        first = self.ev("turn.result", "analyst", {"text": "Взял, передал рисовать, пришлю ссылку.", "subtype": "success",
+                                                   "is_error": False}, src="host", after=5)
+        self.ev("turn.started", "helper", {"marker": f"m{d['seq']}"}, src="hook")
+        done = self.ev("turn.result", "helper", {"text": "Plan is drawn, frame 12:34 in the file.", "subtype": "success",
+                                                 "is_error": False}, src="host", after=30)
+        self.ev("turn.started", "analyst", {"marker": f"m{done['seq']}x1"}, src="hook")   # the core hands helper's reply back
+        return m, first
+
+    def test_a_follow_up_of_a_page_talk_goes_to_telegram(self):
+        m, first = self.page_talk()
+        st = main.state_at(first["seq"])
+        self.assertEqual(first["seq"], st["sessions"]["analyst"]["owner_reply"])   # his reply: the bot's own rule
+        r = self.ev("turn.result", "analyst", {"text": REPORT, "subtype": "success", "is_error": False}, src="host",
+                    after=20)
+        sess = main.state_at(r["seq"])["sessions"]["analyst"]
+        self.assertEqual((r["seq"], f"m{m['seq']}"), (sess.get("owner_out"), sess.get("turn_root")))
+        self.assertNotEqual(r["seq"], sess.get("owner_reply"))   # the clean bot drops it: own page talk, not his reply
+        self.run_tail()
+        got = [s["data"] for s in self.spooled()]
+        self.assertEqual([{"id": f"r{r['seq']}", "title": "analyst · put the plan into Figma", "text": REPORT,
+                           "session": "analyst", "push": False}], got)   # helper's own result and the first reply: not sent
+
+    def test_a_follow_up_of_a_telegram_talk_is_left_to_the_bot(self):
+        self.page_talk(channel="telegram")
+        self.ev("turn.result", "analyst", {"text": REPORT, "subtype": "success", "is_error": False}, src="host", after=20)
+        self.run_tail()
+        self.assertEqual([], self.spooled())
+
+    def test_the_first_reply_to_his_page_word_stays_on_the_page(self):
+        self.page_talk()
+        self.run_tail()
+        self.assertEqual([], self.spooled())   # he is on the page: his reply and helper's result are not sent
+
 
 if __name__ == "__main__":
     unittest.main()

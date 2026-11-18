@@ -1,15 +1,15 @@
 {
   "name": "quiet-unread",
   "icon": "icon.png",
-  "description": "Lights up \"New\" only for results meant for you: a reply to your message or your task, or the continuation of one. A result that comes after your task broke off is also sent to Telegram, once. Service messages stay quiet. The hub always counts; in the settings tick who else lights up on any result.",
+  "description": "Lights up \"New\" only for results meant for you: a reply to your message or your task, or the continuation of one. A result after your task broke off, or later in a talk begun on the page, also goes to Telegram once. Service messages stay quiet; tick in settings who else lights up on any result.",
   "why": "Unread does not nag about service messages",
   "i18n": {
     "ru": {
-      "description": "«Новое» горит только на итоги, адресованные вам: ответ на ваше сообщение или задачу и продолжение такого ответа. Итог после оборвавшейся задачи приходит и в Telegram, один раз. Служебное молчит. Итоги хаба считаются всегда; в настройках отметьте, кому ещё гореть на любой итог.",
+      "description": "«Новое» горит только на итоги, адресованные вам: ответ на ваше сообщение или задачу и продолжение такого ответа. Итог после оборвавшейся задачи или позже в разговоре со страницы приходит и в Telegram, один раз. Служебное молчит; в настройках отметьте, кому ещё гореть на любой итог.",
       "why": "Непрочитанное не дёргает по служебным сообщениям"
     }
   },
-  "version": "0.5.0",
+  "version": "0.6.0",
   "hub": "^1.10",
   "run": [
     "python3",
