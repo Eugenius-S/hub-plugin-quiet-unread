@@ -20,6 +20,9 @@ export const STR = {
     role_agent: "Specialists",
     role_executor: "Executors",
     role_worker: "Other sessions",
+    late: "{session} sent a result on your task: {head}",
+    late_open: "Open the chat of {session}",
+    late_close: "Hide",
   },
   ru: {
     title: "Тихое «непрочитано»",
@@ -29,6 +32,9 @@ export const STR = {
     role_agent: "Специалисты",
     role_executor: "Исполнители",
     role_worker: "Остальные сессии",
+    late: "{session} прислала итог по твоей задаче: {head}",
+    late_open: "Открыть чат {session}",
+    late_close: "Скрыть",
   },
 };
 // the language is read at the moment of use, not at module load
@@ -106,6 +112,89 @@ export function presence({ now = () => Date.now(), store, visible = () => true, 
   };
 }
 
+// A late result in the thread of the owner's word: a session answered on his task later, in its own chat, while he talks in
+// another one (the process main.py decides it from the core's state and posts it to the plugin's channel; the core showed
+// it nowhere as his reply). A plaque above the input field of the chat where he said that word (at; a word from Telegram:
+// any chat but the session's own) names it until he has seen it: a click on it opens that session, or he is at the page
+// with that session open. Seen ones are kept in the browser, a reload keeps them; newest first, at most LATE_MAX.
+export const LATE = "quiet-unread.late";   // localStorage: {seen: [post ids]}
+export const LATE_MAX = 3;
+export const LATE_DAYS = 3;                // older posts are not shown
+export function lateResults({ now = () => Date.now(), store, changed = () => {} } = {}) {
+  let posts = [];   // [{id, ts, session, at, head, words}] from the channel, oldest first
+  const load = () => { try { return JSON.parse(store?.getItem(LATE) || "{}")?.seen || []; } catch { return []; } };
+  const save = (seen) => { try { store?.setItem(LATE, JSON.stringify({ seen: seen.slice(-200) })); } catch { /* private mode */ } };
+  return {
+    // channel posts (hub.feed): only well-formed "late" ones are kept
+    add(rows) {
+      const have = new Set(posts.map((p) => p.id));
+      for (const r of rows || []) {
+        if (have.has(r.id)) continue;
+        let d;
+        try { d = JSON.parse(r.text); } catch { continue; }
+        if (d?.kind !== "late" || typeof d.session !== "string" || !d.session) continue;
+        posts.push({ id: r.id, ts: r.ts, session: d.session, at: d.at || null, head: String(d.head || ""), words: String(d.words || "") });
+      }
+      posts = posts.slice(-100);
+    },
+    // the plaques for the chat `here`: not seen, not the session's own results, newest first
+    shown(here) {
+      if (!here) return [];
+      const seen = new Set(load()), old = now() / 1000 - LATE_DAYS * 86400;
+      return posts.filter((p) => !seen.has(p.id) && p.ts >= old && p.session !== here && (p.at === null || p.at === here))
+        .reverse().slice(0, LATE_MAX);
+    },
+    // a session with a late result not seen yet: its row stays "new"
+    pending(name) {
+      const seen = new Set(load()), old = now() / 1000 - LATE_DAYS * 86400;
+      return posts.some((p) => p.session === name && p.ts >= old && !seen.has(p.id));
+    },
+    // the owner saw it: all of that session's late results (a click on a plaque, he is in its chat)
+    visit(name) {
+      const seen = load(), more = posts.filter((p) => p.session === name && !seen.includes(p.id)).map((p) => p.id);
+      if (!more.length) return;
+      save([...seen, ...more]);
+      changed();
+    },
+    hide(id) {
+      const seen = load();
+      if (seen.includes(id)) return;
+      save([...seen, id]);
+      changed();
+    },
+  };
+}
+
+// the plaques into a slot root: a row per result, a click opens the session that sent it
+export function drawLate(root, rows, t, { open, hide }) {
+  root.hidden = !rows.length;
+  if (!rows.length) { root.replaceChildren(); return; }
+  const doc = root.ownerDocument;
+  const el = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+  root.replaceChildren(...rows.map((r) => {
+    const row = el("div", "qu-late");
+    const go = el("button", "qu-late-go", t("late", { session: r.session, head: r.head }));
+    go.type = "button";
+    go.title = r.words ? `${t("late_open", { session: r.session })}\n${r.words}` : t("late_open", { session: r.session });
+    go.addEventListener("click", () => open(r));
+    const x = el("button", "qu-late-x", "×");
+    x.type = "button";
+    x.title = t("late_close");
+    x.setAttribute("aria-label", t("late_close"));
+    x.addEventListener("click", () => hide(r));
+    row.dataset.post = r.id;
+    row.append(go, x);
+    return row;
+  }));
+}
+const LATE_CSS = `.qu-late{display:flex;align-items:center;gap:6px;margin:0 0 6px;padding:6px 8px 6px 10px;border-radius:10px;
+background:color-mix(in srgb,var(--accent,#3b82f6) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent,#3b82f6) 35%,transparent);font-size:13px}
+.qu-late-go{flex:1;min-width:0;text-align:left;background:none;border:0;padding:0;color:inherit;font:inherit;cursor:pointer;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qu-late-go:hover{text-decoration:underline}
+.qu-late-x{background:none;border:0;padding:0 4px;color:inherit;opacity:.6;font-size:16px;line-height:1;cursor:pointer}
+.qu-late-x:hover{opacity:1}`;
+
 // the open session from the address: #/s/<name>; no address - the hub
 function openSession(hub) {
   const m = /^#\/s\/([^?]+)/.exec(location.hash);
@@ -124,20 +213,36 @@ function browser(hub) {
     changed: () => hub.redraw?.(),
   };
 }
-function listen(p) {
+function listen(p, late, hub) {
   if (typeof window === "undefined") return;
-  const on = () => p.input();
+  const on = () => { p.input(); if (document.visibilityState === "visible") late.visit(openSession(hub)); };
   for (const ev of ["pointerdown", "keydown", "wheel", "touchstart"]) window.addEventListener(ev, on, { capture: true, passive: true });
   // a real move: the page redrawn under a still mouse is not the owner
   window.addEventListener("pointermove", (e) => { if (e.movementX || e.movementY) on(); }, { capture: true, passive: true });
   window.addEventListener("hashchange", () => p.opened());
+  if (!document.getElementById("qu-late-css")) {
+    const st = document.createElement("style");
+    st.id = "qu-late-css";
+    st.textContent = LATE_CSS;
+    document.head.append(st);
+  }
 }
 
 export default function register(hub, deps) {
   if (typeof hub.addUnread !== "function") return;   // a hub without addUnread - as before
   const t = makeT(hub);
-  const p = presence(deps ?? browser(hub));
-  if (!deps) listen(p);
+  const env = deps ?? browser(hub);
+  const p = presence(env);
+  // hub.redraw redraws only the session list: the slot above the input field waits for the next snapshot, and on a quiet
+  // hub there is none — the plaques are repainted here (a read of the channel, a seen one)
+  let slot = null;   // {root, here} of the last render
+  const late = lateResults({ ...env, changed: () => { env.changed?.(); paint(); } });
+  const acts = {
+    open: (r) => { late.visit(r.session); location.hash = `#/s/${encodeURIComponent(r.session)}`; },
+    hide: (r) => late.hide(r.id),
+  };
+  const paint = () => { if (slot) drawLate(slot.root, late.shown(slot.here), t, acts); };
+  if (!deps) listen(p, late, hub);
   const loud = (role) => {
     const r = ROLES.find((o) => o.key === role) || ROLES[ROLES.length - 1];
     return typeof hub.option === "function" ? hub.option(r.key) : r.on;
@@ -155,6 +260,31 @@ export default function register(hub, deps) {
     // is the same object until the core sends it again
     if (typeof s.core_seen !== "number") s.core_seen = s.seen;
     s.seen = p.seen({ ...s, seen: s.core_seen });
-    return unread(s, loud, snap);
+    return late.pending(s.name) || unread(s, loud, snap);
+  });
+  if (typeof hub.addSlot !== "function" || typeof hub.feed !== "function") return;
+  // the channel is read when the snapshot names a newer post (snap.feeds), one read at a time
+  const channel = "quiet-unread";
+  let have = 0, reading = false;
+  const pull = (snap) => {
+    const top = snap?.feeds?.[channel];
+    if (reading || typeof top !== "number" || top <= have) return;
+    reading = true;
+    hub.feed(have).then((rows) => {
+      late.add(rows);
+      for (const r of rows || []) have = Math.max(have, Number(String(r.id).slice(1)) || 0);
+      have = Math.max(have, top);
+      hub.redraw?.();
+      paint();
+    }).catch(() => { /* the next snapshot retries */ }).finally(() => { reading = false; });
+  };
+  hub.addSlot("session.composer", {
+    id: "late",
+    order: -10,
+    render(root, snap, ctx) {
+      slot = { root, here: ctx?.session?.name };
+      paint();
+      pull(snap);
+    },
   });
 }

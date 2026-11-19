@@ -29,6 +29,7 @@ MIN_TEXT = 20         # a shorter result is a status line, not something to read
 POLL = 2.0            # seconds between reads of the journal
 SETTLE = 3.0          # a result is checked once the core's verdict on it (the next line) is written, or after this
 KEEP = 200            # sent ids kept against repeats
+HEAD = 300            # characters of a late result's first line and of the owner's word on its plaque
 CHECK_TIMEOUT = 120   # the child gives up: the result is logged, not sent
 SEQ = re.compile(rb'^\{"seq":([0-9]+),')
 PASS_ON = re.compile(r"^\s*[—–-](\s|$)")   # "—" and "— Done 3 of 5": nothing to read (main.js PASS_ON)
@@ -80,6 +81,36 @@ def important(st, ev):
     return notice(name, seq, text, d.get("words"))
 
 
+def late(st, ev):
+    """A late result in the thread of the owner's word, for the page: a later turn of a chain his own word began (not his
+    direct reply: turn_marker is not the word), that the core counted to him (owner_out) but showed nowhere as his reply -
+    neither as the session's owner_reply nor as the reply line of a task of his (replied_seq). The page shows it as a plaque
+    in the chat where he said that word (at), so that a result does not hide in a chat he is not in; a word from Telegram or
+    the terminal has no chat on the page: at is None, any open chat but the session's own. A result in the chat the word was
+    said in is already in front of him: none. {kind, seq, session, at, head, words} or None."""
+    text = maybe(ev)
+    if text is None:
+        return None
+    name, seq = ev["entity"], ev["seq"]
+    sess = (st.get("sessions") or {}).get(name) or {}
+    if sess.get("kind") == "hub" or sess.get("owner_out") != seq or sess.get("owner_reply") == seq:
+        return None
+    if (sess.get("merged") or {}).get("seq") == seq:
+        return None
+    if any(d.get("replied_seq") == seq and d.get("for") for d in (st.get("delegations") or {}).values()):
+        return None
+    root = sess.get("turn_root")
+    word = (st.get("messages") or {}).get(root or "") or {}
+    if not root or sess.get("turn_marker") == root or not word.get("from_owner"):
+        return None
+    at = word.get("session", word.get("to")) if word.get("channel") == "web" else None
+    if at == name:
+        return None
+    words = " ".join(str(word.get("text") or "").split())
+    return {"kind": "late", "seq": seq, "session": name, "at": at, "head": text.splitlines()[0].strip()[:HEAD],
+            "words": words[:HEAD]}
+
+
 def page_talk(st, name, sess):
     """A later turn of a chain the owner began with his own words to this session on the page (not Telegram): the turn
     was woken by something else (a specialist's reply, an executor's result). The bot keeps the whole chain on the page
@@ -114,7 +145,7 @@ def state_at(seq):
 
 
 def check(seq):
-    """The child: the notice for event seq of the journal (dict) or None."""
+    """The child: {notice, late} for event seq of the journal, or None."""
     ev = None
     with open(JOURNAL, "rb") as f:
         for line in f:
@@ -123,11 +154,11 @@ def check(seq):
     if not ev:
         return None
     st = state_at(seq)
-    return important(st, ev) if st else None
+    return {"notice": important(st, ev), "late": late(st, ev)} if st else None
 
 
 def ask_child(seq):
-    """Run the check in a child process: the core's state stays out of this one. (notice or None, error or None)"""
+    """Run the check in a child process: the core's state stays out of this one. ({notice, late} or None, error or None)"""
     try:
         out = subprocess.run([sys.executable, os.path.abspath(__file__), "--check", str(seq)], capture_output=True,
                              timeout=CHECK_TIMEOUT, env=os.environ.copy())
@@ -141,6 +172,13 @@ def ask_child(seq):
 def send(notice):
     from core import spool
     spool.put(os.path.join(STATE, "spool"), "owner.notify", None, notice, src="ext:" + KEY)
+
+
+def post(late):
+    """A late result into the plugin's own channel: the page reads it (hub.feed); the channel goes nowhere else."""
+    from core import spool
+    spool.put(os.path.join(STATE, "spool"), "ext.post", None,
+              {"plugin": NAME, "text": json.dumps(late, ensure_ascii=False)}, src="ext:" + KEY)
 
 
 def load():
@@ -212,17 +250,23 @@ class Tail:
         sent = []
         while self.pending and (self.pending[0][0]["seq"] < last or now - self.pending[0][1] >= SETTLE):
             ev = self.pending.pop(0)[0]
-            nid = f"r{ev['seq']}"
-            if nid in self.mine.setdefault("sent", []):
+            nid, pid = f"r{ev['seq']}", f"p{ev['seq']}"
+            if nid in self.mine.setdefault("sent", []) and pid in self.mine.setdefault("posted", []):
                 continue
-            notice, err = ask_child(ev["seq"])
+            got, err = ask_child(ev["seq"])
             if err:
                 log("check", ev["seq"], "failed:", err)
-            elif notice:
+                continue
+            notice, lt = (got or {}).get("notice"), (got or {}).get("late")
+            if notice and nid not in self.mine["sent"]:
                 send(notice)   # first the spool, then the record: a crash between them repeats, the id edits the same message
                 self.mine["sent"] = (self.mine["sent"] + [nid])[-KEEP:]
                 sent.append(notice)
                 log("sent", nid, ev.get("entity"))
+            if lt and pid not in self.mine["posted"]:
+                post(lt)
+                self.mine["posted"] = (self.mine["posted"] + [pid])[-KEEP:]
+                log("posted", pid, ev.get("entity"), "->", lt["at"] or "*")
         if self.mine != before:
             ev, _, at = self.pending[0] if self.pending else (None, None, None)
             # a result still waiting: a restart reads again from its line
@@ -239,7 +283,8 @@ def start():
             size = os.path.getsize(JOURNAL)
         except OSError:
             size = 0
-        mine.update(ino=journal.identity(JOURNAL), offset=size, seq=0, sent=mine.get("sent") or [])
+        mine.update(ino=journal.identity(JOURNAL), offset=size, seq=0, sent=mine.get("sent") or [],
+                    posted=mine.get("posted") or [])
     return Tail(mine)
 
 
@@ -254,10 +299,11 @@ def dry(hours):
             if ev.get("type") != "turn.result" or ev["ts"] < since or maybe(ev) is None:
                 continue
             n += 1
-            notice, err = ask_child(ev["seq"])
-            if err or notice:
+            got, err = ask_child(ev["seq"])
+            notice, lt = (got or {}).get("notice"), (got or {}).get("late")
+            if err or notice or lt:
                 print(ev["seq"], time.strftime("%d.%m %H:%M", time.localtime(ev["ts"])), ev["entity"],
-                      err or json.dumps({k: notice[k] for k in ("id", "title")}, ensure_ascii=False), flush=True)
+                      err or json.dumps({"notice": notice and notice["id"], "late": lt and (lt["at"] or "*")}), flush=True)
     print("checked", n, flush=True)
 
 

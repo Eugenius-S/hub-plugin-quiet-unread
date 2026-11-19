@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import register, { unread, presence, STR, ROLES, makeT } from "../main.js";
+import register, { unread, presence, lateResults, LATE, LATE_MAX, STR, ROLES, makeT } from "../main.js";
 
 test("unread - only a result for the owner after they looked", () => {
   assert.equal(unread({ owner_reply: 10, seen: 5, unread: true }), true);
@@ -241,4 +241,88 @@ test("once the owner is at the page the row gets the core's \"seen\" back", () =
   assert.equal(row.seen, 815215);
   assert.equal(row.unread, false);
   assert.equal(answered(row), false);
+});
+
+// late results: the plugin's channel posts (main.py) as plaques above the input of the chat of the owner's word
+const memory = () => { const m = {}; return { getItem: (k) => m[k] ?? null, setItem: (k, v) => { m[k] = v; }, m }; };
+const NOW = 1_800_000_000;
+const post = (seq, session, at, head = `result ${seq}`, ts = NOW - 60) =>
+  ({ id: `p${seq}`, ts, by: "plugin quiet-unread", text: JSON.stringify({ kind: "late", seq, session, at, head, words: "the table" }) });
+
+test("late results: a plaque in the chat of his word, a word from Telegram - any chat but the session's own", () => {
+  const l = lateResults({ now: () => NOW * 1000, store: memory() });
+  l.add([post(1, "writer", null), post(2, "helper", "boss"), { id: "p3", ts: NOW, text: "not json" },
+    { id: "p4", ts: NOW, text: JSON.stringify({ kind: "other", session: "x" }) }]);
+  assert.deepEqual(l.shown("boss").map((p) => p.id), ["p2", "p1"]);   // newest first
+  assert.deepEqual(l.shown("hub-core").map((p) => p.id), ["p1"]);
+  assert.deepEqual(l.shown("writer").map((p) => p.id), []);           // its own chat has it already
+  assert.deepEqual(l.shown("helper").map((p) => p.id), ["p1"]);
+  assert.deepEqual(l.shown(null), []);
+});
+
+test("late results: at most three, old ones not shown, a repeat read adds nothing", () => {
+  const l = lateResults({ now: () => NOW * 1000, store: memory() });
+  const rows = [1, 2, 3, 4, 5].map((n) => post(n, `s${n}`, null));
+  l.add(rows);
+  l.add(rows);
+  l.add([post(6, "s6", null, "old", NOW - 4 * 86400)]);
+  assert.equal(LATE_MAX, 3);
+  assert.deepEqual(l.shown("x").map((p) => p.id), ["p5", "p4", "p3"]);
+});
+
+test("late results: held until seen - a visit to the session or hiding the plaque, a reload keeps it", () => {
+  const store = memory();
+  let changes = 0;
+  const l = lateResults({ now: () => NOW * 1000, store, changed: () => changes++ });
+  l.add([post(1, "writer", null), post(2, "writer", null), post(3, "helper", "boss")]);
+  assert.equal(l.pending("writer"), true);
+  l.visit("writer");
+  assert.deepEqual(l.shown("boss").map((p) => p.id), ["p3"]);
+  assert.equal(l.pending("writer"), false);
+  l.hide("p3");
+  assert.deepEqual(l.shown("boss"), []);
+  assert.equal(changes, 2);
+  l.visit("writer");   // nothing new: no redraw
+  assert.equal(changes, 2);
+  // a reload: the same posts, seen ones stay hidden, a new one shows
+  const again = lateResults({ now: () => NOW * 1000, store });
+  again.add([post(1, "writer", null), post(2, "writer", null), post(3, "helper", "boss"), post(7, "writer", null)]);
+  assert.deepEqual(again.shown("boss").map((p) => p.id), ["p7"]);
+  assert.ok(JSON.parse(store.getItem(LATE)).seen.includes("p3"));
+});
+
+test("late results: the slot reads the channel when the snapshot names a newer post, the row stays new; the plaque is painted without waiting for a snapshot", async () => {
+  const got = {}, asked = [];
+  let redraws = 0;
+  const hub = {
+    addUnread: (fn) => (got.fn = fn), option: () => false, redraw: () => redraws++,
+    addSlot: (slot, it) => (got.slot = [slot, it]),
+    feed: async (since) => { asked.push(since); return [post(5, "writer", null)]; },
+  };
+  register(hub, { now: () => NOW * 1000, store: memory() });
+  assert.equal(got.slot[0], "session.composer");
+  const node = () => ({ dataset: {}, children: [], setAttribute() {}, addEventListener(t, f) { this.on = f; },
+    append(...n) { this.children.push(...n); }, replaceChildren(...n) { this.children = n; } });
+  const root = { ...node(), hidden: false, ownerDocument: { createElement: () => node() } };
+  got.slot[1].render(root, { feeds: {} }, { session: { name: "hub-core" } });
+  assert.deepEqual(asked, []);
+  got.slot[1].render(root, { feeds: { "quiet-unread": 5 } }, { session: { name: "hub-core" } });
+  got.slot[1].render(root, { feeds: { "quiet-unread": 5 } }, { session: { name: "hub-core" } });   // one read at a time
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(asked, [0]);
+  assert.equal(redraws, 1);
+  // hub.redraw redraws only the list: the plaque is already there, with no second render (a quiet hub sends no snapshot)
+  assert.equal(root.hidden, false);
+  assert.equal(root.children[0].children[0].textContent, "writer sent a result on your task: result 5");
+  got.slot[1].render(root, { feeds: { "quiet-unread": 5 } }, { session: { name: "hub-core" } });
+  assert.deepEqual(asked, [0]);   // nothing newer
+  assert.equal(root.hidden, false);
+  got.slot[1].render(root, { feeds: { "quiet-unread": 5 } }, { session: { name: "writer" } });
+  assert.equal(root.hidden, true);   // its own chat
+  assert.equal(got.fn({ name: "writer", role: "agent", owner_reply: 3, owner_out: 5, seen: 9 }), true);
+  assert.equal(got.fn({ name: "other", role: "agent", owner_reply: 3, owner_out: 5, seen: 9 }), false);
+  // × hides it at once, also without a snapshot
+  got.slot[1].render(root, { feeds: { "quiet-unread": 5 } }, { session: { name: "hub-core" } });
+  root.children[0].children[1].on();
+  assert.equal(root.hidden, true);
 });

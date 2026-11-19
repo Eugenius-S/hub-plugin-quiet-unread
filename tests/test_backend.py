@@ -64,12 +64,21 @@ class Replay(unittest.TestCase):
                                            "channel": "session", "owner": False, "sender": "hub"})
         return d
 
-    def spooled(self):
+    def spooled(self, type="owner.notify"):
         found = []
         for path in sorted(glob.glob(os.path.join(STATE, "spool", "*.json"))):
             with open(path, encoding="utf-8") as f:
-                found.append(json.load(f))
+                item = json.load(f)
+            if type is None or item["type"] == type:
+                found.append(item)
         return found
+
+    def posted(self):
+        """The late results posted to the plugin's channel: their data, parsed."""
+        got = self.spooled("ext.post")
+        for g in got:
+            self.assertEqual(("ext:quiet-unread", "quiet-unread"), (g["src"], g["data"]["plugin"]))
+        return [json.loads(g["data"]["text"]) for g in got]
 
     def run_tail(self, later=10.0):
         self.tail.step(now=self.ts)
@@ -92,6 +101,8 @@ class Replay(unittest.TestCase):
         self.run_tail()
         main.start().step(now=self.ts + 20)
         self.assertEqual(1, len(self.spooled()))
+        # his word came from Telegram: on the page a plaque in any chat but analyst's, once
+        self.assertEqual([(r["seq"], "analyst", None)], [(p["seq"], p["session"], p["at"]) for p in self.posted()])
 
     def test_a_pass_on_line_and_a_counter_are_not_sent(self):
         self.broken_task()
@@ -185,9 +196,50 @@ class Replay(unittest.TestCase):
 
     def test_a_follow_up_of_a_telegram_talk_is_left_to_the_bot(self):
         self.page_talk(channel="telegram")
-        self.ev("turn.result", "analyst", {"text": REPORT, "subtype": "success", "is_error": False}, src="host", after=20)
+        r = self.ev("turn.result", "analyst", {"text": REPORT, "subtype": "success", "is_error": False}, src="host", after=20)
         self.run_tail()
         self.assertEqual([], self.spooled())
+        # on the page it is a plaque in any chat but analyst's own: his word has no chat on the page
+        self.assertEqual([{"kind": "late", "seq": r["seq"], "session": "analyst", "at": None, "head": REPORT,
+                           "words": "put the plan into Figma"}], self.posted())
+        main.start().step(now=self.ts + 30)   # a restart: posted once
+        self.tail.mine.update(offset=0, seq=0)
+        self.run_tail()
+        self.assertEqual(1, len(self.posted()))
+
+    def test_a_follow_up_in_the_chat_of_his_word_gets_no_plaque(self):
+        self.page_talk()
+        self.ev("turn.result", "analyst", {"text": REPORT, "subtype": "success", "is_error": False}, src="host", after=20)
+        self.run_tail()
+        self.assertEqual([], self.posted())   # he said it in analyst's chat: the result is right there
+
+    def test_a_later_result_of_his_task_goes_to_the_chat_of_his_word(self):
+        """The owner writes boss on the page; boss gives helper his task; helper's first result is his task's reply (the
+        core puts it into boss's chat as a reply line); helper's next result, woken by boss, shows nowhere but helper's
+        own chat: a plaque in boss's chat."""
+        for name in ("boss", "helper"):
+            self.ev("session.requested", name, {"cwd": TMP, "kind": "work", "role": "agent", "channel": "cli", "owner": True})
+            self.ev("session.started", name, {"session_id": name}, src="hook")
+        m = self.ev("message.received", None, {"to": "boss", "text": "a table of 100 comments", "channel": "web",
+                                               "owner": True})
+        self.ev("turn.started", "boss", {"marker": f"m{m['seq']}"}, src="hook")
+        d = self.ev("delegation.created", None, {"session": "helper", "for": f"m{m['seq']}", "context": "the table",
+                                                 "channel": "session", "owner": False, "sender": "boss"})
+        self.ev("turn.result", "boss", {"text": "Отдал таблицу, пришлю, как будет готова.", "subtype": "success",
+                                        "is_error": False}, src="host", after=5)
+        self.ev("turn.started", "helper", {"marker": f"m{d['seq']}"}, src="hook")
+        first = self.ev("turn.result", "helper", {"text": "Таблица на 130 комментариев готова, файл рядом.",
+                                                  "subtype": "success", "is_error": False}, src="host", after=30)
+        st = main.state_at(first["seq"])
+        self.assertEqual(first["seq"], st["delegations"][f"d{d['seq']}"].get("replied_seq"))   # the core's reply line
+        w = self.ev("message.received", None, {"to": "helper", "text": "fix line 36", "about": f"d{d['seq']}",
+                                               "channel": "session", "owner": False, "sender": "boss"})
+        self.ev("turn.started", "helper", {"marker": f"m{w['seq']}"}, src="hook")
+        r = self.ev("turn.result", "helper", {"text": "Поправил строку 36, таблица готова.\nФайл: table.xlsx",
+                                              "subtype": "success", "is_error": False}, src="host", after=30)
+        self.run_tail()
+        self.assertEqual([{"kind": "late", "seq": r["seq"], "session": "helper", "at": "boss",
+                           "head": "Поправил строку 36, таблица готова.", "words": "a table of 100 comments"}], self.posted())
 
     def test_the_first_reply_to_his_page_word_stays_on_the_page(self):
         self.page_talk()
