@@ -61,9 +61,83 @@ export function unread(s, loud = () => false, snap) {
   return s.owner_reply > s.seen || (s.owner_out > s.seen && afterStopped(s, snap));
 }
 
-export default function register(hub) {
+// "Read" needs the owner at the page. The core's page marks a session read when its new result has stood for a second in
+// a visible tab, whether or not anyone is at the screen: a chat left open on a second monitor reads every reply itself
+// while the owner talks from Telegram or has walked away. Such a result stays "new" here until the owner shows up in
+// this tab after it came: a key, a click, a wheel, a touch or a mouse move while that session is open (or a click just
+// before the core marked it: opening it from the list). Held results are kept in the browser, a reload keeps them.
+export const HELD = "quiet-unread.held";   // localStorage: {session: the core's "seen" the owner really confirmed}
+export const CLICK_MS = 5000;
+export function presence({ now = () => Date.now(), store, visible = () => true, current = () => null, changed = () => {} } = {}) {
+  const live = {};   // session -> { seen, key, at }: the core's "seen" this page last got and when the latest result came
+  let input = -Infinity;
+  const load = () => { try { return JSON.parse(store?.getItem(HELD) || "{}") || {}; } catch { return {}; } };
+  const save = (h) => { try { store?.setItem(HELD, JSON.stringify(h)); } catch { /* private mode: held for this page only */ } };
+  const confirm = (name) => {
+    const h = load();
+    if (!name || !(name in h)) return;
+    delete h[name];
+    save(h);
+    changed();
+  };
+  return {
+    // the owner touched this tab: what the open session shows is read
+    input() {
+      if (!visible()) return;
+      input = now();
+      confirm(current());
+    },
+    // the open session changed by the owner's click: the one opened is in front of them
+    opened() { if (now() - input < CLICK_MS) confirm(current()); },
+    // the core's "seen" for the row, as far as the owner was really here
+    seen(s) {
+      const name = s.name, t = now(), key = [s.owner_out, s.owner_reply, s.last_out].join("|");
+      const was = live[name];
+      live[name] = { seen: s.seen, key, at: was && was.key === key ? was.at : t };
+      const h = load();
+      if (was && typeof s.seen === "number" && s.seen > was.seen && !(name in h)) {
+        const here = visible() && input >= live[name].at && (current() === name || t - input < CLICK_MS);
+        if (!here) { h[name] = was.seen; save(h); }
+      }
+      if (!(name in h)) return s.seen;
+      if (typeof s.seen !== "number" || s.seen < h[name]) { delete h[name]; save(h); return s.seen; }   // the core went back (a new session)
+      return h[name];
+    },
+  };
+}
+
+// the open session from the address: #/s/<name>; no address - the hub
+function openSession(hub) {
+  const m = /^#\/s\/([^?]+)/.exec(location.hash);
+  if (m) { try { return decodeURIComponent(m[1]); } catch { return m[1]; } }
+  if (location.hash && location.hash !== "#/") return null;
+  return (hub.snapshot?.()?.sessions || []).find((r) => r.role === "hub")?.name ?? null;
+}
+function browser(hub) {
+  if (typeof window === "undefined" || typeof document === "undefined") return {};
+  let store = null;
+  try { store = window.localStorage; } catch { /* no storage */ }
+  return {
+    store,
+    visible: () => document.visibilityState === "visible",
+    current: () => openSession(hub),
+    changed: () => hub.redraw?.(),
+  };
+}
+function listen(p) {
+  if (typeof window === "undefined") return;
+  const on = () => p.input();
+  for (const ev of ["pointerdown", "keydown", "wheel", "touchstart"]) window.addEventListener(ev, on, { capture: true, passive: true });
+  // a real move: the page redrawn under a still mouse is not the owner
+  window.addEventListener("pointermove", (e) => { if (e.movementX || e.movementY) on(); }, { capture: true, passive: true });
+  window.addEventListener("hashchange", () => p.opened());
+}
+
+export default function register(hub, deps) {
   if (typeof hub.addUnread !== "function") return;   // a hub without addUnread - as before
   const t = makeT(hub);
+  const p = presence(deps ?? browser(hub));
+  if (!deps) listen(p);
   const loud = (role) => {
     const r = ROLES.find((o) => o.key === role) || ROLES[ROLES.length - 1];
     return typeof hub.option === "function" ? hub.option(r.key) : r.on;
@@ -74,5 +148,5 @@ export default function register(hub) {
       hint: t("hint"),
       options: ROLES.map((r) => ({ key: r.key, label: t(`role_${r.key}`), ...(r.hint ? { hint: t(`role_${r.key}_hint`) } : {}), on: r.on })),
     });
-  hub.addUnread((s, snap) => unread(s, loud, snap));
+  hub.addUnread((s, snap) => unread(typeof s.seen === "number" ? { ...s, seen: p.seen(s) } : s, loud, snap));
 }

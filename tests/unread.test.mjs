@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import register, { unread, STR, ROLES, makeT } from "../main.js";
+import register, { unread, presence, STR, ROLES, makeT } from "../main.js";
 
 test("unread - only a result for the owner after they looked", () => {
   assert.equal(unread({ owner_reply: 10, seen: 5, unread: true }), true);
@@ -111,4 +111,86 @@ test("the hook hands the snapshot over", () => {
   const got = {};
   register({ addUnread: (fn) => (got.fn = fn), option: () => false });
   assert.equal(got.fn(report, snap(task)), true);
+});
+
+// replay of 19.11 (Windows journal): the owner asked hub-launch on the page whether every access was there (m814742) and
+// went on in Telegram; the answer (815215, 10:11:27) was marked read by the open page tab a second later (owner.seen
+// 815217, 10:11:28), the same with every later reply while he wrote from Telegram (10:16-10:42) - none of them lit up.
+// Read needs the owner at the page: an input in this tab after the result came, while that session is open.
+const clockAt = (t0) => { const c = { t: t0 }; c.now = () => c.t; return c; };
+const mem = () => { const m = new Map(); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)) }; };
+const launch = { name: "hub-launch", role: "worker", owner_reply: 815046, owner_out: 815046, last_out: 815046, seen: 815046,
+  out_head: "Записал главный реф" };
+const answer = { ...launch, owner_reply: 815215, owner_out: 815215, last_out: 815215, out_head: "Нашёл в Higgsfield все рефы" };
+
+function page(cur = "hub-launch") {
+  const c = clockAt(1_000_000), store = mem(), env = { visible: true, cur };
+  const p = presence({ now: c.now, store, visible: () => env.visible, current: () => env.cur });
+  const look = (s) => unread({ ...s, seen: p.seen(s) });
+  return { c, store, env, p, look };
+}
+
+test("the open tab marking read with nobody at the page keeps the reply new (19.11 replay)", () => {
+  const { c, look } = page();
+  assert.equal(look(launch), false);                      // first look: what was read stays read
+  c.t += 600_000; assert.equal(look({ ...answer, seen: 815046 }), true);   // the answer came
+  c.t += 1_300; assert.equal(look({ ...answer, seen: 815215 }), true);     // owner.seen 815217: the tab, not the owner
+  assert.equal(unread({ ...answer, seen: 815215 }), false);                // 0.6.0 put the dot out here
+  c.t += 60_000; assert.equal(look({ ...answer, seen: 815215 }), true);    // still new a minute later
+});
+
+test("the owner at the page after the answer came - read as the core says", () => {
+  const { c, p, look } = page();
+  look(launch);
+  c.t += 600_000; look({ ...answer, seen: 815046 });
+  c.t += 500; p.input();                                     // a mouse move, a key, a wheel in this tab
+  c.t += 800; assert.equal(look({ ...answer, seen: 815215 }), false);
+});
+
+test("a held reply goes out once the owner shows up at that session, and only there", () => {
+  const { c, env, p, look } = page("hub-core");
+  look(launch);
+  c.t += 600_000; look({ ...answer, seen: 815046 });
+  c.t += 60_000; look({ ...answer, seen: 815215 });          // marked read on another screen (or the phone page)
+  c.t += 1_000; p.input();                                   // active, but in another session
+  assert.equal(look({ ...answer, seen: 815215 }), true);
+  env.cur = "hub-launch"; p.input();                         // opened it and moved
+  assert.equal(look({ ...answer, seen: 815215 }), false);
+});
+
+test("input before the answer came does not count, a hidden tab gives no input", () => {
+  const { c, env, p, look } = page();
+  look(launch);
+  p.input();
+  c.t += 600_000; look({ ...answer, seen: 815046 });
+  c.t += 1_000; assert.equal(look({ ...answer, seen: 815215 }), true);
+  env.visible = false; p.input();
+  assert.equal(look({ ...answer, seen: 815215 }), true);
+});
+
+test("a held reply survives a reload of the page", () => {
+  const { c, store, env, look } = page();
+  look(launch);
+  c.t += 600_000; look({ ...answer, seen: 815046 });
+  c.t += 1_000; look({ ...answer, seen: 815215 });
+  const again = presence({ now: c.now, store, visible: () => true, current: () => env.cur });
+  assert.equal(unread({ ...answer, seen: again.seen({ ...answer, seen: 815215 }) }), true);
+});
+
+test("a click just before the core marked it (opening it, read all) counts", () => {
+  const { c, env, p, look } = page("hub-core");
+  look(launch);
+  c.t += 600_000; look({ ...answer, seen: 815046 });
+  c.t += 60_000; p.input();                                  // the click in the list
+  env.cur = "hub-launch";
+  c.t += 2_000; assert.equal(look({ ...answer, seen: 815215 }), false);
+});
+
+test("the hook keeps a reply new when the core read it with nobody at the page", () => {
+  const got = {}, c = clockAt(1_000_000);
+  register({ addUnread: (fn) => (got.fn = fn), option: () => false },
+    { now: c.now, store: mem(), visible: () => true, current: () => "hub-launch" });
+  got.fn(launch);
+  c.t += 600_000; got.fn({ ...answer, seen: 815046 });
+  c.t += 1_300; assert.equal(got.fn({ ...answer, seen: 815215 }), true);
 });

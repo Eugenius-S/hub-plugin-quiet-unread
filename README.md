@@ -4,10 +4,11 @@ The "new" mark on a session (the blue dot in the list and the "New" section in t
 
 Service traffic no longer lights up: session replies to core messages, sessions' reports to each other, "pushed", the handoff before sleep, the watchdog. A card with a question to you is still visible by the "waiting for you" mark.
 
-Two cases the core gets wrong are fixed here:
+The cases the core gets wrong are fixed here:
 
 - your task to a session broke on an error, and the session then sent its result anyway: the core no longer ties that result to your task, the plugin still lights it up (within 3 hours of the break, a line of at least 20 characters) and sends it to you as a notice in Telegram, once;
 - a session you talk to on the page answers later in that talk (a specialist or an executor it called brought the work back): the Telegram bot keeps such a chain on the page as your own talk, the plugin sends that later result to Telegram as a notice, once (your direct reply on the page stays there);
+- the page marked a result read only because the session stood open in a visible tab for a second, with nobody at the screen (a chat left on a second monitor while you talk from Telegram or are away): the plugin keeps such a result "new" until you show up in that tab after it came, by a key, a click, a wheel, a touch or a mouse move while that session is open, or by opening it from the list. Held results are kept in the browser, a reload keeps them. A result you read on another device stays "new" here until you touch that session here;
 - a reply that is only a pass-on line or a conveyor counter ("—", "— Done 3 of 5") stays quiet.
 
 ## The process
