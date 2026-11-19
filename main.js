@@ -148,5 +148,13 @@ export default function register(hub, deps) {
       hint: t("hint"),
       options: ROLES.map((r) => ({ key: r.key, label: t(`role_${r.key}`), ...(r.hint ? { hint: t(`role_${r.key}_hint`) } : {}), on: r.on })),
     });
-  hub.addUnread((s, snap) => unread(typeof s.seen === "number" ? { ...s, seen: p.seen(s) } : s, loud, snap));
+  hub.addUnread((s, snap) => {
+    if (typeof s.seen !== "number") return unread(s, loud, snap);
+    // the page sorts and signs rows by the row's own "seen" (the list's "Answered you", the reply line): a held result
+    // goes into the row, or it stays "new" only as a dot in a folded group. The core's value is kept beside it: the row
+    // is the same object until the core sends it again
+    if (typeof s.core_seen !== "number") s.core_seen = s.seen;
+    s.seen = p.seen({ ...s, seen: s.core_seen });
+    return unread(s, loud, snap);
+  });
 }

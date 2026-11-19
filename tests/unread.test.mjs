@@ -194,3 +194,51 @@ test("the hook keeps a reply new when the core read it with nobody at the page",
   c.t += 600_000; got.fn({ ...answer, seen: 815046 });
   c.t += 1_300; assert.equal(got.fn({ ...answer, seen: 815215 }), true);
 });
+
+// the page of hub 1.9.x: api.js applyAll runs the hooks on the snapshot's own row objects, sidebar.js puts a row into
+// "Answered you" by the row's "seen" (a copy of its answered() without the "mark all read" part)
+const answered = (s) => !!s.unread && (s.owner_reply || 0) > (s.seen || 0);
+function apply(fn, s) {
+  s.core_unread ??= !!s.unread;
+  s.unread = s.core_unread;
+  const v = fn(s);
+  if (typeof v === "boolean") s.unread = v;
+  return s;
+}
+
+test("a held reply stays in the list's \"Answered you\", not only as a dot", () => {
+  const got = {}, c = clockAt(1_000_000), env = { cur: "hub-launch" };
+  const deps = { now: c.now, store: mem(), visible: () => true, current: () => env.cur };
+  register({ addUnread: (fn) => (got.fn = fn), option: () => false }, deps);
+  apply(got.fn, { ...launch, unread: false });
+  c.t += 600_000; apply(got.fn, { ...answer, seen: 815046, unread: true });
+  c.t += 1_300;
+  const row = apply(got.fn, { ...answer, seen: 815215, unread: false });   // the core read it with nobody at the page
+  assert.equal(row.unread, true);
+  assert.equal(answered(row), true);
+  apply(got.fn, row); apply(got.fn, row);                                    // hub.redraw: the same object again
+  assert.equal(row.seen, 815046);
+  assert.equal(row.core_seen, 815215);
+  assert.equal(answered(row), true);
+  c.t += 5_000;
+  const next = apply(got.fn, { ...answer, seen: 815215, unread: false });    // the core sent the row again
+  assert.equal(answered(next), true);
+});
+
+test("once the owner is at the page the row gets the core's \"seen\" back", () => {
+  const got = {}, c = clockAt(1_000_000), env = { cur: "hub-launch" };
+
+  const deps = { now: c.now, store: mem(), visible: () => true, current: () => env.cur };
+  register({ addUnread: (fn) => (got.fn = fn), option: () => false }, deps);
+  apply(got.fn, { ...launch, unread: false });
+  c.t += 600_000; apply(got.fn, { ...answer, seen: 815046, unread: true });
+  c.t += 1_300;
+  const row = apply(got.fn, { ...answer, seen: 815215, unread: false });
+  assert.equal(answered(row), true);
+  const touch = presence(deps);   // the same store: what input() does to the hold
+  touch.input();
+  apply(got.fn, row);
+  assert.equal(row.seen, 815215);
+  assert.equal(row.unread, false);
+  assert.equal(answered(row), false);
+});
