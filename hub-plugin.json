@@ -1,15 +1,15 @@
 {
   "name": "quiet-unread",
   "icon": "icon.png",
-  "description": "Lights up \"New\" only for results meant for you: a reply to your message or your task, or the continuation of one. A result after your task broke off, or later in a talk begun on the page, also goes to Telegram once. \"New\" stays until you are at the page after the result came: a chat open in a tab nobody looks at does not read itself, and a held result stays in the list under \"Answered you\". A session that answers on your task later, in its own chat while you talk in another, puts a plaque above the input field of the chat where you gave the task, until you have seen it. Service messages stay quiet; tick in settings who else lights up on any result.",
+  "description": "Lights up \"New\" only for results meant for you: a reply to your message or your task, or the continuation of one. A result after your task broke off, or later in a talk begun on the page, also goes to Telegram once. \"New\" stays until you are at the page after the result came: a chat open in a tab nobody looks at does not read itself, and a held result stays in the list under \"Answered you\". A session that answers on your task later, in its own chat while you talk in another, puts a plaque above the input field of the chat where you gave the task, until you have seen it. A result while the session waits for your decision or look comes to Telegram as \"👀 Waits for you\", once per wait, and stays new on the page until you open its chat. Service messages stay quiet; tick in settings who else lights up on any result.",
   "why": "Unread does not nag about service messages",
   "i18n": {
     "ru": {
-      "description": "«Новое» горит только на итоги, адресованные вам: ответ на ваше сообщение или задачу и продолжение такого ответа. Итог после оборвавшейся задачи или позже в разговоре со страницы приходит и в Telegram, один раз. «Новое» не гаснет, пока вас нет у страницы: открытый чат во вкладке, на которую никто не смотрит, сам себя не читает, а придержанный итог остаётся в списке в «Ответили тебе». Если сессия ответила по вашей задаче позже, в своём чате, пока вы говорите в другом, над полем ввода чата, где вы дали задачу, висит плашка, пока вы её не увидите. Служебное молчит; в настройках отметьте, кому ещё гореть на любой итог.",
+      "description": "«Новое» горит только на итоги, адресованные вам: ответ на ваше сообщение или задачу и продолжение такого ответа. Итог после оборвавшейся задачи или позже в разговоре со страницы приходит и в Telegram, один раз. «Новое» не гаснет, пока вас нет у страницы: открытый чат во вкладке, на которую никто не смотрит, сам себя не читает, а придержанный итог остаётся в списке в «Ответили тебе». Если сессия ответила по вашей задаче позже, в своём чате, пока вы говорите в другом, над полем ввода чата, где вы дали задачу, висит плашка, пока вы её не увидите. Итог, когда сессия ждёт вашего решения или взгляда, приходит в Telegram с пометкой «👀 Ждёт тебя», один раз на ожидание, и горит на странице, пока вы не откроете её чат. Служебное молчит; в настройках отметьте, кому ещё гореть на любой итог.",
       "why": "Непрочитанное не дёргает по служебным сообщениям"
     }
   },
-  "version": "0.9.1",
+  "version": "0.9.2",
   "hub": "^1.10",
   "run": [
     "python3",

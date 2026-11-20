@@ -30,7 +30,9 @@ def tearDownModule():
     shutil.rmtree(TMP, ignore_errors=True)
 
 
-class Replay(unittest.TestCase):
+class Journal(unittest.TestCase):
+    """A temp hub: a journal written as hubd writes it, the plugin's tail on it."""
+
     def setUp(self):
         shutil.rmtree(STATE, ignore_errors=True)
         os.makedirs(STATE)
@@ -84,6 +86,9 @@ class Replay(unittest.TestCase):
         self.tail.step(now=self.ts)
         return self.tail.step(now=self.ts + later)   # SETTLE passed: the last result is checked too
 
+
+
+class Replay(Journal):
     def test_a_report_after_the_task_broke_goes_to_telegram_once(self):
         d = self.broken_task()
         r = self.result(REPORT)
@@ -256,6 +261,168 @@ class Replay(unittest.TestCase):
         self.page_talk()
         self.run_tail()
         self.assertEqual([], self.spooled())   # he is on the page: his reply and helper's result are not sent
+
+
+WAIT = "владелец: посмотреть тестовую сцену перед генерацией"
+SHOWN = "Тестовая сцена готова, посмотри ролик, прежде чем запускать генерацию.\nФайл: test-v1.mp4"
+
+
+class OwnerWait(Journal):
+    """A result while the session waits for the owner (`hub wait "владелец: …"`): it pings him once, with sound."""
+
+    def owner_task(self):
+        """The owner gives analyst a task from Telegram; its turn is running (as hub-launch at 11:44 on 20.11)."""
+        self.ev("session.requested", "analyst", {"cwd": TMP, "kind": "work", "role": "agent", "channel": "cli", "owner": True})
+        self.ev("session.started", "analyst", {"session_id": "x"}, src="hook")
+        m = self.ev("message.received", None, {"to": "analyst", "text": "make a test scene", "channel": "telegram",
+                                               "owner": True})
+        d = self.ev("delegation.created", None, {"session": "analyst", "for": f"m{m['seq']}", "channel": "cli",
+                                                  "owner": True, "words": "make a test scene"})
+        self.ev("turn.started", "analyst", {"marker": f"m{d['seq']}"}, src="hook")
+        return d
+
+    def wait(self, what=WAIT, label="ab12"):
+        """`hub wait` in the turn: two checks of one wait, as bin/hub writes them."""
+        for n in (1, 2):
+            self.ev("schedule.set", f"analyst-wait-{label}-{n}",
+                    {"session": "analyst", "at": self.ts + 600 * n, "prompt": f"[waiting for reply] {what}. Check now.",
+                     "wait": what, "channel": "session", "owner": False, "sender": "analyst"}, src="session")
+        return f"analyst-wait-{label}"
+
+    def answer(self, text=SHOWN, after=30.0):
+        return self.ev("turn.result", "analyst", {"text": text, "subtype": "success", "is_error": False}, src="host",
+                       after=after)
+
+    def notices(self):
+        return [s["data"] for s in self.spooled()]
+
+    def test_the_reply_of_his_task_while_it_waits_for_him_pings_him(self):
+        """The case of 20.11 11:44: the core sends the reply itself (his task), the plugin adds one short ping."""
+        d = self.owner_task()
+        self.wait()
+        r = self.answer()
+        st = main.state_at(r["seq"])
+        self.assertEqual(r["seq"], st["delegations"][f"d{d['seq']}"].get("replied_seq"))   # the bot sends the reply itself
+        self.run_tail()
+        self.assertEqual([{"id": f"w{r['seq']}", "title": "👀 Waits for you: Тестовая сцена готова, посмотри ролик, "
+                           "прежде чем запускать генерацию.", "text": WAIT, "session": "analyst", "push": False}],
+                         self.notices())
+        self.assertEqual([{"kind": "wait", "seq": r["seq"], "session": "analyst", "at": None,
+                           "head": "Тестовая сцена готова, посмотри ролик, прежде чем запускать генерацию.",
+                           "words": WAIT}], self.posted())
+        # a reread, a restart: no second ping
+        self.tail.mine.update(offset=0, seq=0)
+        self.run_tail()
+        main.start().step(now=self.ts + 20)
+        self.assertEqual(1, len(self.spooled()))
+        self.assertEqual(1, len(self.posted()))
+
+    def test_the_owners_language_names_the_ping(self):
+        self.owner_task()
+        self.wait()
+        r = self.answer()
+        with mock.patch("core.i18n.state_lang", return_value="ru"):
+            got = main.check(r["seq"])
+        self.assertTrue(got["wait"]["notice"]["title"].startswith("👀 Ждёт тебя: Тестовая сцена"), got)
+
+    def test_a_reply_without_a_wait_is_not_pinged(self):
+        self.owner_task()
+        self.answer()
+        self.run_tail()
+        self.assertEqual([], self.spooled())
+        self.assertEqual([], self.posted())
+
+    def test_a_wait_of_someone_else_is_not_pinged(self):
+        self.owner_task()
+        self.wait("analyst-helper: ответ по таблице, потом владельцу")
+        self.answer()
+        self.run_tail()
+        self.assertEqual([], self.spooled())
+
+    def test_a_second_result_under_the_same_wait_does_not_ping_again(self):
+        self.owner_task()
+        self.wait()
+        r = self.answer()
+        self.ev("message.received", None, {"to": "analyst", "text": "check the log", "channel": "session", "owner": False,
+                                           "sender": "hub"})
+        self.ev("turn.started", "analyst", {"marker": f"m{self.seq}"}, src="hook")
+        self.answer("Лог проверил, сцена та же, жду твоего взгляда на ролик.")
+        self.run_tail()
+        self.assertEqual([f"w{r['seq']}"], [n["id"] for n in self.notices()])
+
+    def test_a_new_wait_pings_again(self):
+        self.owner_task()
+        self.wait()
+        self.answer()
+        self.ev("turn.started", "analyst", {"marker": f"m{self.seq}"}, src="hook")
+        self.wait("владелец: выбрать один из трёх вариантов", label="cd34")
+        r = self.answer("Сделал три варианта сцены, выбери один.")
+        self.run_tail()
+        self.assertEqual(2, len(self.notices()))
+        self.assertEqual(f"w{r['seq']}", self.notices()[-1]["id"])
+
+    def test_a_wait_done_before_the_result_is_not_pinged(self):
+        self.owner_task()
+        job = self.wait()
+        for n in (1, 2):
+            self.ev("schedule.remove_requested", f"{job}-{n}", {"channel": "session", "owner": False, "sender": "analyst"},
+                    src="session")
+        self.assertEqual({"removed"}, {main.state_at(self.seq)["schedule"][f"{job}-{n}"]["state"] for n in (1, 2)})
+        self.answer()
+        self.run_tail()
+        self.assertEqual([], self.spooled())
+
+    def test_a_result_the_bot_does_not_send_comes_whole_once(self):
+        """The owner's task broke; the late result (0.8.0 sends it as r<seq>) waits for him: one notice, the whole text."""
+        self.broken_task()
+        self.ev("turn.started", "analyst", {"marker": f"m{self.seq}"}, src="hook")
+        self.wait()
+        r = self.answer(REPORT)
+        self.run_tail()
+        self.assertEqual([{"id": f"w{r['seq']}", "title": "👀 Waits for you: " + REPORT, "text": REPORT,
+                           "session": "analyst", "push": False}], self.notices())
+
+    def watch(self, ask="Посмотри ролик и скажи, запускать ли генерацию"):
+        return self.ev("watch.needs_owner", "analyst", {"p": 1.0, "ask": ask, "text": SHOWN, "seen_at": self.ts,
+                                                        "channel": "cli", "owner": True}, src="watch", after=5)
+
+    def test_the_watchdogs_mark_pings_once_per_result(self):
+        self.owner_task()
+        self.answer()
+        w = self.watch()
+        self.assertIn("attention", main.state_at(w["seq"])["sessions"]["analyst"])   # the core took the mark
+        self.watch("Ещё раз: запускать?")   # the same result: no second ping
+        self.run_tail()
+        self.assertEqual([{"id": f"w{w['seq']}", "title": "👀 Waits for you: Посмотри ролик и скажи, запускать ли "
+                           "генерацию", "text": SHOWN, "session": "analyst", "push": False}], self.notices())
+
+    def test_the_watchdogs_mark_after_a_wait_ping_is_not_sent(self):
+        self.owner_task()
+        self.wait()
+        r = self.answer()
+        self.watch()
+        self.run_tail()
+        self.assertEqual([f"w{r['seq']}"], [n["id"] for n in self.notices()])
+
+    def test_the_watchdogs_marks_of_a_busy_talk_ping_once_in_a_while(self):
+        """review-briefly on 20.11 12:11-12:18: a mark on every turn of a live talk, one ping per AGAIN."""
+        self.owner_task()
+        self.answer()
+        first = self.watch()
+        for after in (60.0, 60.0, main.AGAIN):
+            self.ev("turn.started", "analyst", {}, src="hook", after=after)
+            self.answer()
+            last = self.watch()
+        self.run_tail()
+        self.assertEqual([f"w{first['seq']}", f"w{last['seq']}"], [n["id"] for n in self.notices()])
+
+    def test_a_rejected_mark_is_not_sent(self):
+        self.owner_task()
+        self.answer()
+        w = self.watch()
+        self.ev("core.rejected", "analyst", {"of": w["seq"], "type": "watch.needs_owner", "reason": "test"})
+        self.run_tail()
+        self.assertEqual([], self.spooled())
 
 
 if __name__ == "__main__":

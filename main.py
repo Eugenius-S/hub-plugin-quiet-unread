@@ -13,8 +13,15 @@ took it as its reply (replied_seq: the bot sends that one itself), and either a 
 since at most WINDOW before it, or the turn is a later one of a chain he began with his own words to this session on the
 page (page_talk: the bot keeps such a chain on the page as his own talk, though only his direct reply is read there). The child keeps the core's state (hundreds of MB) out of this long-lived process.
 
-Out: owner.notify {id: r<seq>, title, text, session, push: false} through the spool. The same id is never sent twice: the
-sent ids live in <state>/quiet-unread/state.json, written after the spool. The first start begins at the journal's end
+A result to the owner while its session waits for him pings him (waiting): a `hub wait` of that session, still on at the
+result, waits for him ("владелец: …", "owner: …", "отмашка"), or the watchdog marked the session as waiting for him
+(watch.needs_owner, taken by the core). The bot sends such a result like any other, with nothing that says he is needed:
+one notice "👀 Waits for you: <first line>", once per wait and once per turn. The bot sent the result already (his reply,
+his task's reply): the notice carries what the session waits for; it did not: the notice is the result itself, instead
+of r<seq>. On the page the result stays "new" until he is in its chat (a "wait" post, main.js).
+
+Out: owner.notify {id: r<seq> | w<seq>, title, text, session, push: false} through the spool. The same id is never sent
+twice: the sent ids live in <state>/quiet-unread/state.json, written after the spool. The first start begins at the journal's end
 (history is not replayed). `python3 main.py --dry [hours]` prints what the current journal would have sent, sends nothing.
 """
 import json, os, re, subprocess, sys, time
@@ -34,6 +41,14 @@ CHECK_TIMEOUT = 120   # the child gives up: the result is logged, not sent
 SEQ = re.compile(rb'^\{"seq":([0-9]+),')
 PASS_ON = re.compile(r"^\s*[—–-](\s|$)")   # "—" and "— Done 3 of 5": nothing to read (main.js PASS_ON)
 COUNTER = re.compile(r"^\s*(готово|done)\s+\d+\s+(из|of)\s+\d+\b[^\n]*$", re.I)   # a bare conveyor counter line
+# a `hub wait` for the owner: "владелец: …", "owner: …" at the start, "отмашка" anywhere (hub-sync proactive.py WAIT_OWNER),
+# but not "… потом владельцу": that one waits for another session first
+OWNER_WAIT = re.compile(r"^\s*(владел|owner\b)|отмашк", re.I)
+LOOK = {"en": "👀 Waits for you: ", "ru": "👀 Ждёт тебя: "}
+TITLE = 150           # characters of the first line in the title of a ping
+AGAIN = 15 * 60       # a watchdog's mark does not ping a session pinged this recently (a new hub wait still does)
+WANTED = (b'"turn.result"', b'"core.rejected"', b'"watch.needs_owner"')   # the journal lines parsed
+CHECKED = (b'"turn.result"', b'"watch.needs_owner"')                      # the lines checked in a child
 
 
 def log(*parts):
@@ -127,6 +142,70 @@ def notice(name, seq, text, words):
     return {"id": f"r{seq}", "title": title, "text": text, "session": name, "push": False}
 
 
+def owner_waits(st, name):
+    """The `hub wait`s of session name that wait for the owner and are still on: {kin: what it waits for}."""
+    from core import schedule
+    got = {}
+    for jid, job in (st.get("schedule") or {}).items():
+        if not isinstance(job, dict) or job.get("session") != name or job.get("state") in schedule.ENDED:
+            continue
+        what = schedule.waiting_for({**job, "id": jid})
+        if what and OWNER_WAIT.search(what):
+            got[schedule.kin(jid)] = " ".join(what.split())
+    return got
+
+
+def look(st):
+    """ "👀 Waits for you: " in the owner's language."""
+    try:
+        from core import i18n
+        lang = i18n.state_lang(st)
+    except Exception:   # noqa: BLE001 — an older core without languages: English
+        lang = None
+    return LOOK.get(lang) or LOOK["en"]
+
+
+def _ping(st, name, seq, head, text):
+    head = head[:TITLE] + ("…" if len(head) > TITLE else "")
+    return {"id": f"w{seq}", "title": look(st) + head, "text": text, "session": name, "push": False}
+
+
+def waiting(st, ev):
+    """Result ev to the owner while its session waits for him (see the module doc): {notice, waits: [kins], turn, post}
+    or None. The parent sends it once per wait (waits); its notice replaces r<seq>."""
+    text = maybe(ev)
+    if text is None:
+        return None
+    name, seq = ev["entity"], ev["seq"]
+    sess = (st.get("sessions") or {}).get(name) or {}
+    if sess.get("kind") == "hub" or sess.get("owner_out") != seq or (sess.get("merged") or {}).get("seq") == seq:
+        return None
+    waits = owner_waits(st, name)
+    if not waits:
+        return None
+    what = "; ".join(dict.fromkeys(waits.values()))
+    sent = sess.get("owner_reply") == seq or any(d.get("replied_seq") == seq and d.get("for")
+                                                  for d in (st.get("delegations") or {}).values())
+    head = text.splitlines()[0].strip()
+    return {"notice": _ping(st, name, seq, head, what if sent else text), "waits": sorted(waits),
+            "turn": f"{name}:{sess.get('turn_seq')}",
+            "post": {"kind": "wait", "seq": seq, "session": name, "at": None, "head": head[:HEAD], "words": what[:HEAD]}}
+
+
+def marked(st, ev):
+    """The watchdog's "waits for you" mark ev, as the core took it: {notice, waits: [], turn} or None. The parent sends
+    it once per turn and not within AGAIN of the session's last ping. The page shows the mark itself (attention)."""
+    name, data = ev.get("entity"), ev.get("data") or {}
+    sess = (st.get("sessions") or {}).get(name) or {}
+    if not sess or sess.get("kind") == "hub" or (sess.get("attention") or {}).get("since") != ev["ts"]:
+        return None   # rejected, or not this mark
+    ask, text = " ".join(str(data.get("ask") or "").split()), str(data.get("text") or "").strip()
+    head = ask or (text.splitlines() or [""])[0].strip()
+    if not head:
+        return None
+    return {"notice": _ping(st, name, ev["seq"], head, text or ask), "waits": [], "turn": f"{name}:{sess.get('turn_seq')}"}
+
+
 def state_at(seq):
     """The core's state right after event seq: the state file plus the journal up to seq; the state file is already
     further on (it is written every 50 events) or does not join — the whole journal folded up to seq. None: not found."""
@@ -145,16 +224,20 @@ def state_at(seq):
 
 
 def check(seq):
-    """The child: {notice, late} for event seq of the journal, or None."""
+    """The child: {notice, late, wait} for result seq of the journal, {wait} for a watchdog's mark, or None."""
     ev = None
     with open(JOURNAL, "rb") as f:
         for line in f:
-            if line.startswith(b'{"seq":%d,' % seq) and b'"turn.result"' in line[:300]:
+            if line.startswith(b'{"seq":%d,' % seq) and any(w in line[:300] for w in CHECKED):
                 ev = json.loads(line)
     if not ev:
         return None
     st = state_at(seq)
-    return {"notice": important(st, ev), "late": late(st, ev)} if st else None
+    if not st:
+        return None
+    if ev["type"] == "watch.needs_owner":
+        return {"wait": marked(st, ev)}
+    return {"notice": important(st, ev), "late": late(st, ev), "wait": waiting(st, ev)}
 
 
 def ask_child(seq):
@@ -201,14 +284,15 @@ class Tail:
     """Reads journal.jsonl from where it stopped; after a rotation continues in the new file (journal.go_on)."""
 
     def __init__(self, mine):
-        self.mine = mine   # {seq, ino, offset, sent: [ids], posted: [ids]}
-        for key in ("sent", "posted"):
+        self.mine = mine   # {seq, ino, offset, sent: [ids], posted: [ids], waited: [wait kins], pinged: [turns]}
+        for key in ("sent", "posted", "waited", "pinged"):
             mine.setdefault(key, [])   # a state saved by an older version lacks the newer list
+        mine.setdefault("pinged_at", {})   # {session: ts of its last ping}
         self.pending = []  # [(event, seen at)] results waiting for the core's verdict
 
     def lines(self):
-        """New journal lines: (seq, event, offset of the line) - the event parsed only for a result or a rejection, else None;
-        the offset is None for the end of the archive after a rotation."""
+        """New journal lines: (seq, event, offset of the line) - the event parsed only for a result, a rejection or a
+        watchdog's mark, else None; the offset is None for the end of the archive after a rotation."""
         from core import journal
         now = journal.identity(JOURNAL)
         if not now:
@@ -228,7 +312,7 @@ class Tail:
                     at, offset = offset, offset + len(line)
                     head = SEQ.match(line)
                     if head:
-                        wanted = b'"turn.result"' in line[:300] or b'"core.rejected"' in line[:300]
+                        wanted = any(w in line[:300] for w in WANTED)
                         got.append((int(head[1]), json.loads(line) if wanted else None, at))
         except OSError:
             return []
@@ -246,20 +330,33 @@ class Tail:
             if e and e["type"] == "core.rejected":
                 of = (e.get("data") or {}).get("of")
                 self.pending = [p for p in self.pending if p[0]["seq"] != of]
-            elif e and maybe(e) is not None:
+            elif e and (e["type"] == "watch.needs_owner" or maybe(e) is not None):
                 self.pending.append((e, now, at))
             self.mine["seq"] = last = seq
         sent = []
         while self.pending and (self.pending[0][0]["seq"] < last or now - self.pending[0][1] >= SETTLE):
             ev = self.pending.pop(0)[0]
-            nid, pid = f"r{ev['seq']}", f"p{ev['seq']}"
-            if nid in self.mine["sent"] and pid in self.mine["posted"]:
+            nid, pid, wid = f"r{ev['seq']}", f"p{ev['seq']}", f"w{ev['seq']}"
+            if {nid, wid} & set(self.mine["sent"]) and {pid, wid} & set(self.mine["posted"]):
                 continue
             got, err = ask_child(ev["seq"])
             if err:
                 log("check", ev["seq"], "failed:", err)
                 continue
-            notice, lt = (got or {}).get("notice"), (got or {}).get("late")
+            notice, lt, wt = (got or {}).get("notice"), (got or {}).get("late"), (got or {}).get("wait")
+            name, at_ts = ev.get("entity"), ev.get("ts") or now
+            if wt and (any(k not in self.mine["waited"] for k in wt["waits"]) if wt["waits"]
+                       else wt["turn"] not in self.mine["pinged"]
+                       and at_ts - self.mine["pinged_at"].get(name, 0) >= AGAIN):
+                self.mine["pinged_at"] = {**self.mine["pinged_at"], name: at_ts}
+                if wid not in self.mine["sent"]:
+                    send(wt["notice"])   # the result's own text when the bot did not send it: instead of r<seq>
+                    self.mine["sent"] = (self.mine["sent"] + [wid])[-KEEP:]
+                    sent.append(wt["notice"])
+                    log("pinged", wid, ev.get("entity"))
+                self.mine["waited"] = (self.mine["waited"] + [k for k in wt["waits"] if k not in self.mine["waited"]])[-KEEP:]
+                self.mine["pinged"] = (self.mine["pinged"] + [wt["turn"]])[-KEEP:]
+                notice, lt, pid = None, wt.get("post"), wid
             if notice and nid not in self.mine["sent"]:
                 send(notice)   # first the spool, then the record: a crash between them repeats, the id edits the same message
                 self.mine["sent"] = (self.mine["sent"] + [nid])[-KEEP:]
@@ -295,17 +392,19 @@ def dry(hours):
     since, n = time.time() - hours * 3600, 0
     with open(JOURNAL, "rb") as f:
         for line in f:
-            if b'"turn.result"' not in line[:300]:
+            if not any(w in line[:300] for w in CHECKED):
                 continue
             ev = json.loads(line)
-            if ev.get("type") != "turn.result" or ev["ts"] < since or maybe(ev) is None:
+            if ev["ts"] < since or ev.get("type") not in ("turn.result", "watch.needs_owner") or (
+                    ev["type"] == "turn.result" and maybe(ev) is None):
                 continue
             n += 1
             got, err = ask_child(ev["seq"])
-            notice, lt = (got or {}).get("notice"), (got or {}).get("late")
-            if err or notice or lt:
+            notice, lt, wt = (got or {}).get("notice"), (got or {}).get("late"), (got or {}).get("wait")
+            if err or notice or lt or wt:
                 print(ev["seq"], time.strftime("%d.%m %H:%M", time.localtime(ev["ts"])), ev["entity"],
-                      err or json.dumps({"notice": notice and notice["id"], "late": lt and (lt["at"] or "*")}), flush=True)
+                      err or json.dumps({"notice": notice and notice["id"], "late": lt and (lt["at"] or "*"),
+                                         "wait": wt and (wt["waits"] or wt["turn"])}, ensure_ascii=False), flush=True)
     print("checked", n, flush=True)
 
 

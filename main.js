@@ -21,6 +21,7 @@ export const STR = {
     role_executor: "Executors",
     role_worker: "Other sessions",
     late: "{session} sent a result on your task: {head}",
+    wait: "👀 {session} waits for you: {head}",
     late_open: "Open the chat of {session}",
     late_close: "Hide",
   },
@@ -33,6 +34,7 @@ export const STR = {
     role_executor: "Исполнители",
     role_worker: "Остальные сессии",
     late: "{session} прислала итог по твоей задаче: {head}",
+    wait: "👀 {session} ждёт тебя: {head}",
     late_open: "Открыть чат {session}",
     late_close: "Скрыть",
   },
@@ -117,23 +119,24 @@ export function presence({ now = () => Date.now(), store, visible = () => true, 
 // it nowhere as his reply). A plaque above the input field of the chat where he said that word (at; a word from Telegram:
 // any chat but the session's own) names it until he has seen it: a click on it opens that session, or he is at the page
 // with that session open. Seen ones are kept in the browser, a reload keeps them; newest first, at most LATE_MAX.
+// A result while its session waits for the owner (main.py waiting, kind "wait") is held the same way, in any chat but its own.
 export const LATE = "quiet-unread.late";   // localStorage: {seen: [post ids]}
 export const LATE_MAX = 3;
 export const LATE_DAYS = 3;                // older posts are not shown
 export function lateResults({ now = () => Date.now(), store, changed = () => {} } = {}) {
-  let posts = [];   // [{id, ts, session, at, head, words}] from the channel, oldest first
+  let posts = [];   // [{id, ts, kind, session, at, head, words}] from the channel, oldest first
   const load = () => { try { return JSON.parse(store?.getItem(LATE) || "{}")?.seen || []; } catch { return []; } };
   const save = (seen) => { try { store?.setItem(LATE, JSON.stringify({ seen: seen.slice(-200) })); } catch { /* private mode */ } };
   return {
-    // channel posts (hub.feed): only well-formed "late" ones are kept
+    // channel posts (hub.feed): only well-formed "late" and "wait" ones are kept
     add(rows) {
       const have = new Set(posts.map((p) => p.id));
       for (const r of rows || []) {
         if (have.has(r.id)) continue;
         let d;
         try { d = JSON.parse(r.text); } catch { continue; }
-        if (d?.kind !== "late" || typeof d.session !== "string" || !d.session) continue;
-        posts.push({ id: r.id, ts: r.ts, session: d.session, at: d.at || null, head: String(d.head || ""), words: String(d.words || "") });
+        if ((d?.kind !== "late" && d?.kind !== "wait") || typeof d.session !== "string" || !d.session) continue;
+        posts.push({ id: r.id, ts: r.ts, kind: d.kind, session: d.session, at: d.at || null, head: String(d.head || ""), words: String(d.words || "") });
       }
       posts = posts.slice(-100);
     },
@@ -173,7 +176,7 @@ export function drawLate(root, rows, t, { open, hide }) {
   const el = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
   root.replaceChildren(...rows.map((r) => {
     const row = el("div", "qu-late");
-    const go = el("button", "qu-late-go", t("late", { session: r.session, head: r.head }));
+    const go = el("button", "qu-late-go", t(r.kind === "wait" ? "wait" : "late", { session: r.session, head: r.head }));
     go.type = "button";
     go.title = r.words ? `${t("late_open", { session: r.session })}\n${r.words}` : t("late_open", { session: r.session });
     go.addEventListener("click", () => open(r));

@@ -291,6 +291,20 @@ test("late results: held until seen - a visit to the session or hiding the plaqu
   assert.ok(JSON.parse(store.getItem(LATE)).seen.includes("p3"));
 });
 
+test("a result while its session waits for him: held like a late one, its plaque says the session waits for him", () => {
+  const l = lateResults({ now: () => NOW * 1000, store: memory() });
+  const wait = { id: "p8", ts: NOW - 60, text: JSON.stringify({ kind: "wait", seq: 8, session: "analyst", at: null,
+    head: "The test scene is ready", words: "owner: look at the test scene" }) };
+  l.add([wait, post(9, "writer", null)]);
+  assert.deepEqual(l.shown("boss").map((p) => [p.id, p.kind]), [["p9", "late"], ["p8", "wait"]]);
+  assert.deepEqual(l.shown("analyst").map((p) => p.id), ["p9"]);   // its own chat has it already
+  assert.equal(l.pending("analyst"), true);                          // the row stays new until he is in its chat
+  l.visit("analyst");
+  assert.equal(l.pending("analyst"), false);
+  assert.match(makeT({ lang: "ru" })("wait", { session: "analyst", head: "Сцена готова" }), /^👀 analyst ждёт тебя: Сцена готова$/);
+  assert.match(makeT({ lang: "en" })("wait", { session: "analyst", head: "Scene" }), /^👀 analyst waits for you: Scene$/);
+});
+
 test("late results: the slot reads the channel when the snapshot names a newer post, the row stays new; the plaque is painted without waiting for a snapshot", async () => {
   const got = {}, asked = [];
   let redraws = 0;
