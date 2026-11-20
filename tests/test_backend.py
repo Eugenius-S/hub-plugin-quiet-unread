@@ -386,15 +386,66 @@ class OwnerWait(Journal):
         return self.ev("watch.needs_owner", "analyst", {"p": 1.0, "ask": ask, "text": SHOWN, "seen_at": self.ts,
                                                         "channel": "cli", "owner": True}, src="watch", after=5)
 
+    def next_turn(self, after=None):
+        """A later turn of the same talk, past AGAIN: its result does not ping again under the same wait."""
+        self.ev("turn.started", "analyst", {}, src="hook", after=main.AGAIN if after is None else after)
+        return self.answer("Поправил сцену, ролик тот же, жду твоего взгляда.")
+
     def test_the_watchdogs_mark_pings_once_per_result(self):
         self.owner_task()
-        self.answer()
+        self.wait()
+        r = self.answer()
+        self.next_turn()
         w = self.watch()
         self.assertIn("attention", main.state_at(w["seq"])["sessions"]["analyst"])   # the core took the mark
         self.watch("Ещё раз: запускать?")   # the same result: no second ping
         self.run_tail()
-        self.assertEqual([{"id": f"w{w['seq']}", "title": "👀 Waits for you: Посмотри ролик и скажи, запускать ли "
-                           "генерацию", "text": SHOWN, "session": "analyst", "push": False}], self.notices())
+        self.assertEqual([f"w{r['seq']}", f"w{w['seq']}"], [n["id"] for n in self.notices()])
+        self.assertEqual({"id": f"w{w['seq']}", "title": "👀 Waits for you: Посмотри ролик и скажи, запускать ли "
+                          "генерацию", "text": SHOWN, "session": "analyst", "push": False}, self.notices()[-1])
+
+    def test_a_mark_without_his_wait_is_a_guess_and_does_not_ping(self):
+        """The owner on 20.11 (m923575, "why did it come to me in Telegram?"): the watchdog's mark without a question
+        form is a guess; on his task it pings only while a `hub wait` of the session waits for him."""
+        self.owner_task()
+        self.answer()
+        self.watch()
+        self.run_tail()
+        self.assertEqual([], self.spooled())
+        self.assertEqual([], self.posted())
+
+    def others_task(self, wait=False):
+        """The case of 20.11 18:51 (journal 923208-923245): a writer gives a line of the interface to the session that
+        asked for it (its task, --for-session); the watchdog marks the result as waiting for the owner: the mark."""
+        self.ev("session.requested", "analyst", {"cwd": TMP, "kind": "work", "role": "agent", "channel": "cli", "owner": True})
+        self.ev("session.started", "analyst", {"session_id": "x"}, src="hook")
+        self.ev("session.requested", "builder", {"cwd": TMP, "kind": "work", "role": "agent", "channel": "cli",
+                                                 "owner": True})
+        self.ev("session.started", "builder", {"session_id": "y"}, src="hook")
+        root = self.ev("message.received", None, {"to": "builder", "text": "make the send page", "channel": "web",
+                                                  "owner": True})
+        d = self.ev("delegation.created", None, {"session": "analyst", "for_session": "builder", "root": f"m{root['seq']}",
+                                                  "context": "One line of the interface: a hint under a stuck post.",
+                                                  "channel": "session", "owner": False, "sender": "builder"},
+                    src="session")
+        if wait:
+            self.wait()
+        self.ev("turn.started", "analyst", {"marker": f"m{d['seq']}"}, src="hook")
+        self.assertEqual("builder", main.state_at(self.seq)["delegations"][f"d{d['seq']}"]["for_session"])
+        self.answer("«Хаб не отвечает: нажми «Вернуть в очередь» выше»\nКнопку называю прямо, чтобы подсказка вела к ней.")
+        w = self.watch("Нажмите кнопку «Вернуть в очередь» выше.")
+        self.assertIn("attention", main.state_at(w["seq"])["sessions"]["analyst"])   # the core took the mark
+        return w
+
+    def test_a_mark_on_another_sessions_task_does_not_ping(self):
+        self.others_task()
+        self.run_tail()
+        self.assertEqual([], self.spooled())
+
+    def test_a_mark_on_another_sessions_task_is_not_his_even_under_his_wait(self):
+        """Not at all (m923604): a wait for him makes no guess about another session's task his."""
+        w = self.others_task(wait=True)
+        self.assertIsNone(main.check(w["seq"])["wait"])
 
     def test_the_watchdogs_mark_after_a_wait_ping_is_not_sent(self):
         self.owner_task()
@@ -407,14 +458,15 @@ class OwnerWait(Journal):
     def test_the_watchdogs_marks_of_a_busy_talk_ping_once_in_a_while(self):
         """review-briefly on 20.11 12:11-12:18: a mark on every turn of a live talk, one ping per AGAIN."""
         self.owner_task()
-        self.answer()
-        first = self.watch()
-        for after in (60.0, 60.0, main.AGAIN):
-            self.ev("turn.started", "analyst", {}, src="hook", after=after)
-            self.answer()
+        self.wait()
+        r = self.answer()
+        first = None
+        for after in (main.AGAIN, 60.0, 60.0, main.AGAIN):
+            self.next_turn(after)
             last = self.watch()
+            first = first or last
         self.run_tail()
-        self.assertEqual([f"w{first['seq']}", f"w{last['seq']}"], [n["id"] for n in self.notices()])
+        self.assertEqual([f"w{r['seq']}", f"w{first['seq']}", f"w{last['seq']}"], [n["id"] for n in self.notices()])
 
     def test_a_rejected_mark_is_not_sent(self):
         self.owner_task()
@@ -509,12 +561,15 @@ class Repeat(OwnerWait):
 
     def test_a_mark_pings_again_until_a_new_turn_drops_it(self):
         self.owner_task()
+        self.wait()
         self.answer()
+        self.next_turn()
         w = self.watch()
         self.run_tail()
-        self.assertEqual([("Wed 12:40", f"w{w['seq']}.1")], self.clock(2.5))
+        self.assertEqual(f"w{w['seq']}", self.notices()[-1]["id"])
+        self.assertEqual([("Wed 12:56", f"w{w['seq']}.1")], self.clock(2.5))
         self.ev("turn.started", "analyst", {}, src="hook", after=60)
-        self.answer("Сделал без тебя, ничего не нужно.")   # no wait: the mark is gone
+        self.answer("Сделал без тебя, ничего не нужно.")   # the mark is gone with the new turn
         self.assertEqual([], self.clock(48))
 
     def test_a_restart_keeps_the_pings_going(self):

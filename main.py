@@ -15,8 +15,9 @@ page (page_talk: the bot keeps such a chain on the page as his own talk, though 
 
 A result to the owner while its session waits for him pings him (waiting): a `hub wait` of that session, still on at the
 result, waits for him ("владелец: …", "owner: …", "отмашка"), or the watchdog marked the session as waiting for him
-(watch.needs_owner, taken by the core). The bot sends such a result like any other, with nothing that says he is needed:
-one notice "👀 Waits for you: <first line>", once per wait and once per turn. The bot sent the result already (his reply,
+(watch.needs_owner, taken by the core) on a turn of his own task while such a wait is on: the mark alone is the
+watchdog's guess, and a turn on another session's task is never his (owner's word 20.11). The bot sends such a result
+like any other, with nothing that says he is needed: one notice "👀 Waits for you: <first line>", once per wait and once per turn. The bot sent the result already (his reply,
 his task's reply): the notice carries what the session waits for; it did not: the notice is the result itself, instead
 of r<seq>. On the page the result stays "new" until he is in its chat (a "wait" post, main.js).
 
@@ -208,6 +209,19 @@ def waiting(st, ev):
             "post": {"kind": "wait", "seq": seq, "session": name, "at": None, "head": head[:HEAD], "words": what[:HEAD]}}
 
 
+def owners_turn(st, sess):
+    """Whether the session's turn is on the owner's own word: his message, his word passed on (--for), or his task -
+    `for` with no `for_session` (as the core's digest of his tasks); not the chain's root, which an old word of his to
+    the hub gives to every task of every session after it. A turn without a marker goes on with the session's task."""
+    msg = (st.get("messages") or {}).get(sess.get("turn_marker") or "")
+    if msg and (msg.get("from_owner") or msg.get("re")):
+        return True
+    did = (msg.get("task") or msg.get("for_delegation") or msg.get("delegation") or msg.get("about") if msg
+           else sess.get("delegation") or sess.get("last_task"))
+    d = (st.get("delegations") or {}).get(did or "") or {}
+    return bool(d.get("for") and not d.get("for_session"))
+
+
 def marked(st, ev):
     """The watchdog's "waits for you" mark ev, as the core took it: {notice, waits: [], turn} or None. The parent sends
     it once per turn and not within AGAIN of the session's last ping. The page shows the mark itself (attention)."""
@@ -215,6 +229,8 @@ def marked(st, ev):
     sess = (st.get("sessions") or {}).get(name) or {}
     if not sess or sess.get("kind") == "hub" or (sess.get("attention") or {}).get("since") != ev["ts"]:
         return None   # rejected, or not this mark
+    if not owners_turn(st, sess) or not owner_waits(st, name):
+        return None   # a guess: the turn is not on his task, or nothing of the session says it waits for him
     ask, text = " ".join(str(data.get("ask") or "").split()), str(data.get("text") or "").strip()
     head = ask or (text.splitlines() or [""])[0].strip()
     if not head:
