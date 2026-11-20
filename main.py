@@ -20,11 +20,20 @@ one notice "👀 Waits for you: <first line>", once per wait and once per turn. 
 his task's reply): the notice carries what the session waits for; it did not: the notice is the result itself, instead
 of r<seq>. On the page the result stays "new" until he is in its chat (a "wait" post, main.js).
 
-Out: owner.notify {id: r<seq> | w<seq>, title, text, session, push: false} through the spool. The same id is never sent
+A ping he leaves unanswered comes again (nag): every EVERY of a work day (10:00-19:00, Russian work calendar of hub-sync,
+<state>/workcal-<year>.json; without it Saturday and Sunday are off), at most REPEATS times, a new notice
+w<seq>.<n> "<session>: <what it waits for>" (the same id would only edit the old message). An evening or a day off keeps
+the repeat to 10:00 of the next work day. It stops on his answer to that session, read from the journal lines: his message
+to it (the page, Telegram, a reply to its post there), his word passed to it (`--for`, a task), his reaction to its post,
+his answer to its card; and when the wait is over, checked in a child against the core's state: its `hub wait` removed
+(`hub wait done`), the watchdog's mark dropped (a new turn), the session gone. A new ping of the session takes the place of
+its open repeats.
+
+Out: owner.notify {id: r<seq> | w<seq> | w<seq>.<n>, title, text, session, push: false} through the spool. The same id is never sent
 twice: the sent ids live in <state>/quiet-unread/state.json, written after the spool. The first start begins at the journal's end
 (history is not replayed). `python3 main.py --dry [hours]` prints what the current journal would have sent, sends nothing.
 """
-import json, os, re, subprocess, sys, time
+import datetime, json, os, re, subprocess, sys, time
 
 KEY = os.environ.get("HUB_EXTENSION") or "quiet-unread"   # hub.json extensions key: <account>:quiet-unread from the market
 NAME = KEY.split(":")[-1]
@@ -47,7 +56,14 @@ OWNER_WAIT = re.compile(r"^\s*(владел|owner\b)|отмашк", re.I)
 LOOK = {"en": "👀 Waits for you: ", "ru": "👀 Ждёт тебя: "}
 TITLE = 150           # characters of the first line in the title of a ping
 AGAIN = 15 * 60       # a watchdog's mark does not ping a session pinged this recently (a new hub wait still does)
-WANTED = (b'"turn.result"', b'"core.rejected"', b'"watch.needs_owner"')   # the journal lines parsed
+EVERY = 2 * 3600      # an unanswered ping comes again this often, in work hours
+REPEATS = 4           # times it comes again, at most
+WORK = (10, 19)       # the work hours of a work day, local time
+RETRY = 600           # a repeat whose check failed is tried again this much later
+FORGET = 7 * 86400    # an open repeat is dropped this long after its ping
+ZONE = None           # the clock of work hours: the machine's local time (tests set UTC)
+ANSWERS = (b'"message.received"', b'"message.reacted"', b'"permission.answered"', b'"delegation.created"')
+WANTED = (b'"turn.result"', b'"core.rejected"', b'"watch.needs_owner"') + ANSWERS   # the journal lines parsed
 CHECKED = (b'"turn.result"', b'"watch.needs_owner"')                      # the lines checked in a child
 
 
@@ -188,7 +204,7 @@ def waiting(st, ev):
                                                   for d in (st.get("delegations") or {}).values())
     head = text.splitlines()[0].strip()
     return {"notice": _ping(st, name, seq, head, what if sent else text), "waits": sorted(waits),
-            "turn": f"{name}:{sess.get('turn_seq')}",
+            "turn": f"{name}:{sess.get('turn_seq')}", "what": what,
             "post": {"kind": "wait", "seq": seq, "session": name, "at": None, "head": head[:HEAD], "words": what[:HEAD]}}
 
 
@@ -203,7 +219,63 @@ def marked(st, ev):
     head = ask or (text.splitlines() or [""])[0].strip()
     if not head:
         return None
-    return {"notice": _ping(st, name, ev["seq"], head, text or ask), "waits": [], "turn": f"{name}:{sess.get('turn_seq')}"}
+    return {"notice": _ping(st, name, ev["seq"], head, text or ask), "waits": [], "turn": f"{name}:{sess.get('turn_seq')}",
+            "what": head, "mark": ev["ts"]}
+
+
+def still(st, nag):
+    """Whether the wait of an open repeat is still on in state st: its session is there, its `hub wait`s are not removed
+    (a wait whose checks are done still waits), or - a watchdog's mark - the very mark is still on the session."""
+    from core import schedule
+    sess = (st.get("sessions") or {}).get(nag["session"]) or {}
+    if not sess or sess.get("state") == "removed":
+        return False
+    if not nag.get("kins"):
+        return (sess.get("attention") or {}).get("since") == nag.get("mark")
+    jobs = [job for jid, job in (st.get("schedule") or {}).items()
+            if isinstance(job, dict) and schedule.kin(jid) in nag["kins"]]
+    return bool(jobs) and not any(job.get("state") == "removed" for job in jobs)
+
+
+def answered(e):
+    """The session the owner answered with journal event e, or None: his message to it (his own, or his word passed on
+    with `for`), a task for him given to it, his reaction to its post, his answer to its card."""
+    data, kind = e.get("data") or {}, e.get("type")
+    if kind == "message.received" and (data.get("owner") or data.get("for")):
+        return data.get("to")
+    if kind == "delegation.created" and data.get("for"):
+        return data.get("session")
+    if kind == "message.reacted" and data.get("owner"):
+        return data.get("session")
+    if kind == "permission.answered" and data.get("owner"):
+        return e.get("entity")
+    return None
+
+
+def _local(ts):
+    return datetime.datetime.fromtimestamp(ts, ZONE) if ZONE else datetime.datetime.fromtimestamp(ts).astimezone()
+
+
+def off(day):
+    """Whether date day is a day off: the Russian work calendar hub-sync keeps (workday), else Saturday and Sunday."""
+    try:
+        with open(os.path.join(STATE, f"workcal-{day.year}.json"), encoding="utf-8") as f:
+            days = json.load(f)["off"]
+        return day.strftime("%m-%d") in days
+    except (OSError, ValueError, KeyError, TypeError):
+        return day.weekday() >= 5
+
+
+def next_work(ts):
+    """The first moment at or after ts in work hours of a work day."""
+    t = _local(ts)
+    for _ in range(60):
+        start, end = t.replace(hour=WORK[0], minute=0, second=0, microsecond=0), t.replace(hour=WORK[1], minute=0,
+                                                                                            second=0, microsecond=0)
+        if not off(t.date()) and t < end:
+            return max(t, start).timestamp()
+        t = (start + datetime.timedelta(days=1)).replace(hour=0)
+    return ts
 
 
 def state_at(seq):
@@ -223,6 +295,12 @@ def state_at(seq):
     return st if st.get("seq") == seq else None
 
 
+def checked_still(seq, nag):
+    """The child: whether the wait of repeat nag is still on right after event seq (None: no state)."""
+    st = state_at(seq)
+    return None if not st else still(st, nag)
+
+
 def check(seq):
     """The child: {notice, late, wait} for result seq of the journal, {wait} for a watchdog's mark, or None."""
     ev = None
@@ -240,10 +318,12 @@ def check(seq):
     return {"notice": important(st, ev), "late": late(st, ev), "wait": waiting(st, ev)}
 
 
-def ask_child(seq):
-    """Run the check in a child process: the core's state stays out of this one. ({notice, late} or None, error or None)"""
+def ask_child(seq, nag=None):
+    """Run the check in a child process: the core's state stays out of this one. ({notice, late} or None, error or None);
+    with nag: whether its wait is still on."""
+    args = ["--still", str(seq), json.dumps(nag)] if nag else ["--check", str(seq)]
     try:
-        out = subprocess.run([sys.executable, os.path.abspath(__file__), "--check", str(seq)], capture_output=True,
+        out = subprocess.run([sys.executable, os.path.abspath(__file__), *args], capture_output=True,
                              timeout=CHECK_TIMEOUT, env=os.environ.copy())
     except subprocess.TimeoutExpired:
         return None, "timeout"
@@ -283,12 +363,26 @@ def save(mine):
 class Tail:
     """Reads journal.jsonl from where it stopped; after a rotation continues in the new file (journal.go_on)."""
 
-    def __init__(self, mine):
+    def __init__(self, mine, dry=False):
         self.mine = mine   # {seq, ino, offset, sent: [ids], posted: [ids], waited: [wait kins], pinged: [turns]}
         for key in ("sent", "posted", "waited", "pinged"):
             mine.setdefault(key, [])   # a state saved by an older version lacks the newer list
         mine.setdefault("pinged_at", {})   # {session: ts of its last ping}
+        mine.setdefault("nag", {})   # {wid: {seq, session, kins, mark, title, what, n, due, at}} open repeats
         self.pending = []  # [(event, seen at)] results waiting for the core's verdict
+        self.dry = [] if dry else None   # a dry run: [(ts, kind, data)] of what would go out; nothing is sent or saved
+
+    def _send(self, notice, now):
+        if self.dry is None:
+            send(notice)
+        else:
+            self.dry.append((now, "notice", notice))
+
+    def _post(self, late, now):
+        if self.dry is None:
+            post(late)
+        else:
+            self.dry.append((now, "post", late))
 
     def lines(self):
         """New journal lines: (seq, event, offset of the line) - the event parsed only for a result, a rejection or a
@@ -321,13 +415,19 @@ class Tail:
 
     def step(self, now=None):
         """One read: new results queue up, settled ones (the core's verdict line is written, or SETTLE passed) are
-        checked and sent. The notices sent."""
+        checked and sent; due repeats are checked and sent. The notices sent."""
         now = time.time() if now is None else now
-        before, last = dict(self.mine), self.mine.get("seq") or 0
-        for seq, e, at in self.lines():
+        return self.feed(self.lines(), now)
+
+    def feed(self, items, now):
+        before, last, heard = dict(self.mine), self.mine.get("seq") or 0, []
+        for seq, e, at in items:
             if seq <= last:
                 continue   # read already (a carried part after a rotation, a reread from the start)
-            if e and e["type"] == "core.rejected":
+            who = e and answered(e)
+            if who:
+                heard.append((seq, who))
+            elif e and e["type"] == "core.rejected":
                 of = (e.get("data") or {}).get("of")
                 self.pending = [p for p in self.pending if p[0]["seq"] != of]
             elif e and (e["type"] == "watch.needs_owner" or maybe(e) is not None):
@@ -350,26 +450,69 @@ class Tail:
                        and at_ts - self.mine["pinged_at"].get(name, 0) >= AGAIN):
                 self.mine["pinged_at"] = {**self.mine["pinged_at"], name: at_ts}
                 if wid not in self.mine["sent"]:
-                    send(wt["notice"])   # the result's own text when the bot did not send it: instead of r<seq>
+                    self._send(wt["notice"], now)   # the result's own text when the bot did not send it: instead of r<seq>
                     self.mine["sent"] = (self.mine["sent"] + [wid])[-KEEP:]
                     sent.append(wt["notice"])
                     log("pinged", wid, ev.get("entity"))
+                    nags = {k: v for k, v in self.mine["nag"].items() if v["session"] != name}   # it takes their place
+                    nags[wid] = {"seq": ev["seq"], "session": name, "kins": wt["waits"], "mark": wt.get("mark"),
+                                 "title": wt["notice"]["title"], "what": wt.get("what") or "", "n": 0,
+                                 "due": next_work(now + EVERY), "at": now}
+                    self.mine["nag"] = nags
                 self.mine["waited"] = (self.mine["waited"] + [k for k in wt["waits"] if k not in self.mine["waited"]])[-KEEP:]
                 self.mine["pinged"] = (self.mine["pinged"] + [wt["turn"]])[-KEEP:]
                 notice, lt, pid = None, wt.get("post"), wid
+            elif wt and not wt["waits"]:   # a mark not pinged (pinged lately): an open repeat of a mark follows the new one
+                self.mine["nag"] = {k: {**v, "mark": wt["mark"]} if v["session"] == name and not v["kins"] else v
+                                    for k, v in self.mine["nag"].items()}
             if notice and nid not in self.mine["sent"]:
-                send(notice)   # first the spool, then the record: a crash between them repeats, the id edits the same message
+                self._send(notice, now)   # first the spool, then the record: a crash between them repeats, the id edits the same message
                 self.mine["sent"] = (self.mine["sent"] + [nid])[-KEEP:]
                 sent.append(notice)
                 log("sent", nid, ev.get("entity"))
             if lt and pid not in self.mine["posted"]:
-                post(lt)
+                self._post(lt, now)
                 self.mine["posted"] = (self.mine["posted"] + [pid])[-KEEP:]
                 log("posted", pid, ev.get("entity"), "->", lt["at"] or "*")
+        sent += self.nag(heard, now)
+        if self.dry is not None:
+            return sent
         if self.mine != before:
             ev, _, at = self.pending[0] if self.pending else (None, None, None)
             # a result still waiting: a restart reads again from its line
             save({**self.mine, "seq": ev["seq"] - 1, "offset": at} if at is not None else self.mine)
+        return sent
+
+
+    def nag(self, heard, now):
+        """Close the repeats he answered (heard: [(seq, session)]) or that are old, check and send the due ones."""
+        nags = {k: v for k, v in self.mine["nag"].items()
+                if now - v["at"] < FORGET and not any(s == v["session"] and seq > v["seq"] for seq, s in heard)}
+        sent = []
+        for wid, v in sorted(nags.items(), key=lambda kv: kv[1]["due"]):
+            if v["due"] > now or self.pending:
+                continue   # not yet; or a result read is not checked yet: it may take the place of this one
+            on, err = ask_child(self.mine["seq"], v)
+            if err or on is None:
+                log("repeat", wid, "check failed:", err or "no state")
+                nags[wid] = {**v, "due": now + RETRY}
+                continue
+            if not on:
+                log("repeat", wid, "over")
+                del nags[wid]
+                continue
+            n = v["n"] + 1
+            notice = {"id": f"{wid}.{n}", "title": v["title"], "text": f"{v['session']}: {v['what']}",
+                      "session": v["session"], "push": False}
+            self._send(notice, now)
+            sent.append(notice)
+            log("repeated", notice["id"], v["session"])
+            if n >= REPEATS:
+                del nags[wid]
+            else:
+                nags[wid] = {**v, "n": n, "due": next_work(now + EVERY)}
+        if nags != self.mine["nag"]:
+            self.mine["nag"] = nags
         return sent
 
 
@@ -387,30 +530,45 @@ def start():
     return Tail(mine)
 
 
-def dry(hours):
-    """What the current journal would have sent in the last hours (nothing is sent)."""
-    since, n = time.time() - hours * 3600, 0
+def dry(hours, now=None):
+    """What the tail would have sent over the last hours of the current journal, repeats too, replayed on the events'
+    own clock and then on to now (nothing is sent or saved). Prints each notice and post, then the repeats by session."""
+    from core import journal
+    now = time.time() if now is None else now
+    since, offset, seq = now - hours * 3600, 0, 0
     with open(JOURNAL, "rb") as f:
         for line in f:
-            if not any(w in line[:300] for w in CHECKED):
-                continue
-            ev = json.loads(line)
-            if ev["ts"] < since or ev.get("type") not in ("turn.result", "watch.needs_owner") or (
-                    ev["type"] == "turn.result" and maybe(ev) is None):
-                continue
-            n += 1
-            got, err = ask_child(ev["seq"])
-            notice, lt, wt = (got or {}).get("notice"), (got or {}).get("late"), (got or {}).get("wait")
-            if err or notice or lt or wt:
-                print(ev["seq"], time.strftime("%d.%m %H:%M", time.localtime(ev["ts"])), ev["entity"],
-                      err or json.dumps({"notice": notice and notice["id"], "late": lt and (lt["at"] or "*"),
-                                         "wait": wt and (wt["waits"] or wt["turn"])}, ensure_ascii=False), flush=True)
-    print("checked", n, flush=True)
+            head = SEQ.match(line)
+            if head and b'"ts":' in line[:80] and json.loads(line)["ts"] >= since:
+                break
+            offset, seq = offset + len(line), int(head[1]) if head else seq
+    tail = Tail({"ino": journal.identity(JOURNAL), "offset": offset, "seq": seq}, dry=True)
+    items, clock = tail.lines(), since
+    for item in items:
+        clock = max(clock, (item[1] or {}).get("ts") or clock)
+        tail.feed([item], clock)
+    while clock < now:
+        clock = min(now, clock + 600)
+        tail.feed([], clock)
+    by = {}
+    for ts, kind, data in tail.dry:
+        what = data["id"] if kind == "notice" else "post " + data["kind"]
+        print(time.strftime("%d.%m %H:%M", time.localtime(ts)), data["session"], what,
+              (data.get("title") or data.get("head") or "")[:100], flush=True)
+        if kind == "notice" and "." in data["id"]:
+            by[data["session"]] = by.get(data["session"], 0) + 1
+    print("lines", len(items), "repeats", sum(by.values()), json.dumps(by, ensure_ascii=False))
+    for wid, v in tail.mine["nag"].items():
+        print("open", wid, v["session"], "sent", v["n"], "next", time.strftime("%d.%m %H:%M", time.localtime(v["due"])),
+              v["what"][:100])
 
 
 def main(argv):
     if argv[:1] == ["--check"]:
         print(json.dumps(check(int(argv[1])), ensure_ascii=False))
+        return
+    if argv[:1] == ["--still"]:
+        print(json.dumps(checked_still(int(argv[1]), json.loads(argv[2]))))
         return
     if argv[:1] == ["--dry"]:
         return dry(float(argv[1]) if argv[1:] else 24)

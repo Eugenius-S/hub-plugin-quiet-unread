@@ -425,5 +425,112 @@ class OwnerWait(Journal):
         self.assertEqual([], self.spooled())
 
 
+WED = 1_799_836_200.0   # Wed 13.01.2027 10:30 UTC: a work day, the tests' clock is UTC
+
+
+class Repeat(OwnerWait):
+    """A ping stays open while the owner says nothing: it comes again every 2 hours of a work day, 10:00-19:00, up to 4
+    times; his word to the session, a reaction, a card answer, `hub wait done` or a mark dropped by a new turn end it."""
+
+    def setUp(self):
+        super().setUp()
+        self.ts = WED
+        zone = mock.patch.object(main, "ZONE", main.datetime.timezone.utc)
+        zone.start()
+        self.addCleanup(zone.stop)
+        with open(os.path.join(STATE, "workcal-2027.json"), "w", encoding="utf-8") as f:
+            json.dump({"year": 2027, "off": ["01-16", "01-17", "01-18"]}, f)   # a weekend and a Monday holiday
+
+    def pinged(self):
+        self.owner_task()
+        self.wait()
+        r = self.answer()
+        self.run_tail()
+        self.assertEqual([f"w{r['seq']}"], [n["id"] for n in self.notices()])
+        return r
+
+    def clock(self, hours, every=600):
+        """The tail runs for hours more: [(hour UTC, id)] of what it sent."""
+        got, end, t = [], self.ts + hours * 3600, self.ts
+        while t < end:
+            t += every
+            got += [(main.datetime.datetime.fromtimestamp(t, main.datetime.timezone.utc).strftime("%a %H:%M"), n["id"])
+                     for n in self.tail.step(now=t)]
+        self.ts = t
+        return got
+
+    def test_a_silent_owner_is_pinged_again_every_two_hours_up_to_four_times(self):
+        r = self.pinged()
+        w = f"w{r['seq']}"
+        self.assertEqual([("Wed 12:40", w + ".1"), ("Wed 14:40", w + ".2"), ("Wed 16:40", w + ".3"),
+                          ("Wed 18:40", w + ".4")], self.clock(48))
+        again = self.notices()[1]
+        self.assertEqual((self.notices()[0]["title"], "analyst: " + WAIT, "analyst", False),
+                         (again["title"], again["text"], again["session"], again["push"]))
+
+    def test_evening_and_days_off_wait_for_ten_in_the_morning(self):
+        self.ts = WED + 2 * 86400 + 7 * 3600   # Fri 17:30
+        r = self.pinged()
+        w = f"w{r['seq']}"
+        self.assertEqual([("Tue 10:00", w + ".1"), ("Tue 12:00", w + ".2"), ("Tue 14:00", w + ".3"),
+                          ("Tue 16:00", w + ".4")], self.clock(5 * 24))
+
+    def test_his_word_to_the_session_stops_the_pings(self):
+        self.pinged()
+        self.ev("message.received", None, {"to": "analyst", "text": "смотрю", "channel": "telegram", "owner": True},
+                after=600)
+        self.assertEqual([], self.clock(48))
+
+    def test_his_reaction_to_its_post_stops_the_pings(self):
+        r = self.pinged()
+        self.ev("message.reacted", None, {"target": str(r["seq"]), "session": "analyst", "emoji": "👍",
+                                          "channel": "web", "owner": True}, src="web", after=600)
+        self.assertEqual([], self.clock(48))
+
+    def test_a_relayed_word_of_his_stops_the_pings(self):
+        self.pinged()
+        self.ev("message.received", None, {"to": "analyst", "text": "владелец: годится", "for": "m1",
+                                           "channel": "session", "owner": False, "sender": "hub"}, after=600)
+        self.assertEqual([], self.clock(48))
+
+    def test_wait_done_stops_the_pings(self):
+        r = self.pinged()
+        self.assertEqual([("Wed 12:40", f"w{r['seq']}.1")], self.clock(2.5))
+        for n in (1, 2):
+            self.ev("schedule.remove_requested", f"analyst-wait-ab12-{n}",
+                    {"channel": "session", "owner": False, "sender": "analyst"}, src="session", after=60)
+        self.assertEqual([], self.clock(48))
+
+    def test_a_word_of_his_to_another_session_does_not_stop_them(self):
+        self.pinged()
+        self.ev("message.received", None, {"to": "hub", "text": "что нового?", "channel": "telegram", "owner": True},
+                after=600)
+        self.assertEqual(4, len(self.clock(48)))
+
+    def test_a_mark_pings_again_until_a_new_turn_drops_it(self):
+        self.owner_task()
+        self.answer()
+        w = self.watch()
+        self.run_tail()
+        self.assertEqual([("Wed 12:40", f"w{w['seq']}.1")], self.clock(2.5))
+        self.ev("turn.started", "analyst", {}, src="hook", after=60)
+        self.answer("Сделал без тебя, ничего не нужно.")   # no wait: the mark is gone
+        self.assertEqual([], self.clock(48))
+
+    def test_a_restart_keeps_the_pings_going(self):
+        r = self.pinged()
+        self.tail = main.start()
+        self.assertEqual(f"w{r['seq']}.1", self.clock(2.5)[0][1])
+
+    def test_a_new_wait_takes_the_place_of_the_old_one(self):
+        self.pinged()
+        self.ev("turn.started", "analyst", {}, src="hook", after=600)
+        self.wait("владелец: выбрать один из трёх вариантов", label="cd34")
+        r = self.answer("Сделал три варианта сцены, выбери один.")
+        self.run_tail()
+        got = self.clock(48)
+        self.assertEqual([f"w{r['seq']}.{n}" for n in (1, 2, 3, 4)], [i for _, i in got])
+
+
 if __name__ == "__main__":
     unittest.main()
