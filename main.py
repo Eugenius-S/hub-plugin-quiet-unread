@@ -201,7 +201,9 @@ class Tail:
     """Reads journal.jsonl from where it stopped; after a rotation continues in the new file (journal.go_on)."""
 
     def __init__(self, mine):
-        self.mine = mine   # {seq, ino, offset, sent: [ids]}
+        self.mine = mine   # {seq, ino, offset, sent: [ids], posted: [ids]}
+        for key in ("sent", "posted"):
+            mine.setdefault(key, [])   # a state saved by an older version lacks the newer list
         self.pending = []  # [(event, seen at)] results waiting for the core's verdict
 
     def lines(self):
@@ -251,7 +253,7 @@ class Tail:
         while self.pending and (self.pending[0][0]["seq"] < last or now - self.pending[0][1] >= SETTLE):
             ev = self.pending.pop(0)[0]
             nid, pid = f"r{ev['seq']}", f"p{ev['seq']}"
-            if nid in self.mine.setdefault("sent", []) and pid in self.mine.setdefault("posted", []):
+            if nid in self.mine["sent"] and pid in self.mine["posted"]:
                 continue
             got, err = ask_child(ev["seq"])
             if err:

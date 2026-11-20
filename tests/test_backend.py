@@ -207,6 +207,17 @@ class Replay(unittest.TestCase):
         self.run_tail()
         self.assertEqual(1, len(self.posted()))
 
+    def test_a_state_saved_before_plaques_still_posts(self):
+        """state.json of 0.8.0 has no "posted": a late result is posted, not a KeyError on every read."""
+        self.page_talk(channel="telegram")
+        self.run_tail()
+        main.save({k: v for k, v in self.tail.mine.items() if k != "posted"})
+        self.assertNotIn("posted", main.load())   # as on a hub updated from 0.8.0
+        self.tail = main.start()
+        r = self.ev("turn.result", "analyst", {"text": REPORT, "subtype": "success", "is_error": False}, src="host", after=20)
+        self.run_tail()
+        self.assertEqual([r["seq"]], [p["seq"] for p in self.posted()])
+
     def test_a_follow_up_in_the_chat_of_his_word_gets_no_plaque(self):
         self.page_talk()
         self.ev("turn.result", "analyst", {"text": REPORT, "subtype": "success", "is_error": False}, src="host", after=20)
